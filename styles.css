@@ -1,0 +1,629 @@
+/* Template contract — keep this sizing block intact when re-theming.
+   The game runs in an iframe inside iOS/Android WebViews, where viewport
+   units (100vh/100dvh/100vw) go stale after the view scrolls or hides and
+   leave blank bands; this container-percentage chain is what sizes the game
+   reliably. Restyle colors, fonts, and visuals freely, but do not replace
+   these sizing/overflow rules or size any root container in viewport units. */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+/* Hidden means hidden: a component's own display rule must not bring back
+   an element marked hidden (an end screen showing over the start screen). */
+[hidden],
+.hidden {
+  display: none !important;
+}
+
+/* Low-specificity flex/grid shrink floor: intrinsic content must not widen or
+   deepen a layout track beyond the handheld frame. Component minimums win. */
+:where(#app *) {
+  min-width: 0;
+  min-height: 0;
+}
+
+html,
+body {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  overscroll-behavior: none;
+  background: #0e0e10;
+  color: #f5f5f5;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+}
+
+body {
+  position: fixed;
+  inset: 0;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+#app {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  /* Text strokes are centered on glyph contours. Paint the fill last so an
+     outline stays outside instead of cutting into counters and thin strokes. */
+  paint-order: stroke fill;
+  /* Size container: children size type/spacing in cqw/cqh/cqmin units,
+     which track the actual game frame (viewport units are banned above). */
+  container-type: size;
+}
+
+/* Template contract — the device's safe area. On a phone the game is drawn
+   edge to edge: the camera cutout covers the top of the frame and the home
+   indicator the bottom. The Playabl app publishes those insets as
+   --playabl-safe-area-* (fixed while the game is open); a browser may give
+   env(safe-area-inset-*); on desktop and in the editor both are 0, so nothing
+   moves there. The backdrop and a frame-filling canvas stay full bleed. The
+   HUD, controls, panels and toasts live in one .safe-area layer, which is
+   also the positioned ancestor every anchored layout.json element is measured
+   from (the SDK writes their top/left, so padding on a parent would not move
+   them). (PLA-1260) */
+:root {
+  --safe-top: var(--playabl-safe-area-top, env(safe-area-inset-top, 0px));
+  --safe-right: var(--playabl-safe-area-right, env(safe-area-inset-right, 0px));
+  --safe-bottom: var(--playabl-safe-area-bottom, env(safe-area-inset-bottom, 0px));
+  --safe-left: var(--playabl-safe-area-left, env(safe-area-inset-left, 0px));
+}
+
+.safe-area {
+  position: absolute;
+  inset: var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left);
+  min-width: 0;
+  min-height: 0;
+}
+
+/* A bar or tray with an opaque background against the top or bottom of the
+   safe area: a strip the height of the inset carries its background out to
+   the frame edge, so no band of backdrop shows under the camera or the home
+   indicator, while the bar's box and content stay where they are. The strip
+   inherits the background, a creator's layout.json colour included. An
+   anchored element keeps the SDK's position: absolute (inline wins); the bar
+   needs visible overflow. */
+.bleed-top,
+.bleed-bottom {
+  position: relative;
+}
+
+.bleed-top::before,
+.bleed-bottom::after {
+  content: "";
+  position: absolute;
+  inset-inline: 0;
+  background: inherit;
+  pointer-events: none;
+}
+
+.bleed-top::before {
+  bottom: 100%;
+  height: var(--safe-top);
+}
+
+.bleed-bottom::after {
+  top: 100%;
+  height: var(--safe-bottom);
+}
+
+/* Do not inherit the HTML text safeguard into SVG artwork, whose fill/stroke
+   layering may intentionally use the SVG default. */
+#app svg {
+  paint-order: normal;
+}
+
+canvas,
+.game-surface {
+  box-sizing: border-box;
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+button,
+[role="button"] {
+  touch-action: manipulation;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Template contract — fit-mechanics primitives. Layout is top-down: the
+   frame is the budget and content adapts to its box, so overflow is
+   impossible by construction. These classes carry ONLY fit mechanics —
+   shrink/wrap behavior, min-width: 0 (flex children otherwise refuse to
+   shrink below their text), truncation, container-query type scaling, 44px
+   touch minimums, and gaps. They are deliberately unstyled: their look
+   (colors, backgrounds, radii, borders, fonts) is yours to build from the
+   game's art direction. Custom controls and layouts are welcome too — keep
+   the same fit rules. Do not remove the sizing/min/max/overflow/gap rules. */
+
+/* Horizontal band of HUD stats. Wraps as a final containment fallback;
+   compact handheld frames can be short as well as narrow, so keep the
+   primary row iconic and hide/truncate secondary labels before relying on a
+   second line. Grid-track friendly: use as the `auto` rows of a
+   `grid-template-rows: auto minmax(0, 1fr) auto` page layout. */
+.hud-row {
+  box-sizing: border-box;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  min-width: 0;
+  gap: clamp(6px, 2cqw, 14px);
+  padding: clamp(6px, 2cqmin, 12px);
+}
+
+/* Compact HUD stat (score, timer, lives). Truncates rather than breaking
+   layout as a last resort; add `flex-shrink: 0` to a badge that must never
+   truncate (score, timer) so decorative neighbors compress first. */
+.badge {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4em;
+  min-width: 0;
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding-inline: 0.4em;
+  font-size: clamp(12px, 3.5cqw, 18px);
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Discrete status pips (hearts, lives, stars, ammo). Pips are fixed-size
+   flex items, NEVER repeated glyphs inside a truncating text run: glyphs
+   like ♥ resolve through different fallback fonts per browser, take
+   different widths, and get clipped by ellipsis in Firefox/Safari but not
+   Chrome. The fixed box is what makes a pip safe — its content can be
+   whatever fits the game: a glyph centered in the box (the box neutralizes
+   glyph-width differences), a generated sprite via `background: url(...)
+   center/contain no-repeat`, or an SVG/mask shape. */
+.pip-row {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  gap: clamp(2px, 0.8cqw, 6px);
+}
+
+.pip {
+  flex: 0 0 auto;
+  width: clamp(12px, 4cqw, 20px);
+  aspect-ratio: 1;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+
+/* Touch-control band. */
+.controls-row {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-width: 0;
+  gap: clamp(12px, 3cqw, 20px);
+  padding: clamp(8px, 2cqmin, 14px);
+}
+
+/* Finger-sized control. 44px is the minimum touch target; the gap above is
+   the minimum separation. flex: 0 1 auto lets a crowded row shrink buttons
+   down to (but never below) the minimum. overflow keeps legacy raw-text
+   buttons contained; wrap text in .control-label for a visible ellipsis. */
+.control-btn {
+  box-sizing: border-box;
+  flex: 0 1 auto;
+  min-width: 44px;
+  max-width: 100%;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  padding: 0.5em 1em;
+  font-size: clamp(13px, 3.5cqw, 18px);
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.control-label {
+  min-width: 0;
+  max-width: 100%;
+  padding-inline: 0.4em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- Last Light MX ------------------------------------------------------ */
+:root {
+  --ink: #fff4e6;
+  --ink-dim: rgba(255, 236, 214, 0.72);
+  --panel: rgba(26, 14, 6, 0.52);
+  --panel-edge: rgba(255, 196, 130, 0.18);
+  --accent: #ff8a3d;
+  --display: "Barlow Condensed", "Arial Narrow", ui-sans-serif, system-ui, sans-serif;
+  --ui: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+#app {
+  background: #1a0e06;
+}
+
+.game-root {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.game-canvas {
+  position: absolute;
+  inset: 0;
+}
+
+.hud {
+  pointer-events: none;
+  color: var(--ink);
+  font-family: var(--ui);
+}
+
+.hud-top {
+  position: absolute;
+  inset-inline: 0;
+  top: 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: clamp(8px, 2cqw, 20px);
+  padding: clamp(8px, 1.6cqmin, 18px);
+}
+
+.hud-panel {
+  background: var(--panel);
+  border: 1px solid var(--panel-edge);
+  border-radius: 10px;
+  /* The chamfer motif: one clipped corner, echoed on cards and call-outs. */
+  border-top-left-radius: 2px;
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  min-width: 0;
+}
+
+.hud-speed {
+  display: grid;
+  gap: 2px;
+  padding: 6px 14px 8px;
+  flex-shrink: 0;
+}
+
+.speed-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.speed-value {
+  font-family: var(--display);
+  font-weight: 700;
+  font-size: clamp(30px, min(5.2cqw, 9cqh), 58px);
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  min-width: 2ch;
+  text-align: end;
+}
+
+.speed-unit {
+  font-family: var(--display);
+  font-weight: 600;
+  font-size: clamp(13px, 1.5cqw, 18px);
+  color: var(--ink-dim);
+  letter-spacing: 0.04em;
+}
+
+.place-row {
+  display: flex;
+  gap: 10px;
+  font-size: clamp(11px, 1.1cqw, 14px);
+  color: var(--ink-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding-inline: 0.2em;
+}
+
+.place-name {
+  color: var(--ink);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.place-dist {
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-records {
+  display: flex;
+  gap: clamp(8px, 1.4cqw, 18px);
+  padding: 8px 12px;
+  flex-shrink: 1;
+}
+
+.rec {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  transition: color 0.3s;
+}
+
+.rec-icon {
+  display: grid;
+  place-items: center;
+  width: clamp(16px, 1.8cqw, 22px);
+  aspect-ratio: 1;
+  flex: 0 0 auto;
+}
+
+.rec-icon svg {
+  width: 100%;
+  height: 100%;
+  fill: none;
+  stroke: var(--ink-dim);
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.rec-val {
+  font-family: var(--display);
+  font-weight: 600;
+  font-size: clamp(16px, 1.8cqw, 24px);
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  padding-inline: 0.1em;
+}
+
+.rec.fresh .rec-val {
+  color: var(--accent);
+}
+
+.rec.fresh .rec-icon svg {
+  stroke: var(--accent);
+}
+
+.section-card {
+  position: absolute;
+  left: 50%;
+  top: clamp(64px, 12cqh, 120px);
+  translate: -50% 0;
+  width: max-content;
+  max-width: 80%;
+  display: grid;
+  justify-items: center;
+  gap: 2px;
+  padding: 8px 22px 10px;
+  background: var(--panel);
+  border: 1px solid var(--panel-edge);
+  border-radius: 10px;
+  border-top-left-radius: 2px;
+  opacity: 0;
+  transition: opacity 0.6s ease, translate 0.6s ease;
+}
+
+.section-card.show {
+  opacity: 1;
+  translate: -50% 4px;
+}
+
+.section-kicker {
+  font-size: clamp(10px, 1cqw, 13px);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.section-name {
+  font-family: var(--display);
+  font-weight: 700;
+  font-style: italic;
+  font-size: min(4.2cqw, 8cqh, 48px);
+  line-height: 1;
+  padding-inline: 0.15em;
+  white-space: nowrap;
+}
+
+.popups {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+}
+
+.popup {
+  position: absolute;
+  display: grid;
+  justify-items: center;
+  width: max-content;
+  padding: 4px 12px 6px;
+  border-radius: 8px;
+  border-top-left-radius: 2px;
+  background: rgba(26, 14, 6, 0.6);
+  border: 1px solid var(--panel-edge);
+  will-change: translate, opacity;
+}
+
+.popup-main {
+  font-family: var(--display);
+  font-weight: 700;
+  font-size: clamp(20px, 2.4cqw, 34px);
+  line-height: 1;
+  padding-inline: 0.1em;
+}
+
+.popup-sub {
+  font-size: clamp(10px, 1cqw, 13px);
+  color: var(--ink-dim);
+  letter-spacing: 0.04em;
+}
+
+.popup.best {
+  border-color: rgba(255, 138, 61, 0.7);
+}
+
+.popup.best .popup-sub {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.popup-wreck .popup-main {
+  color: #ffd0a8;
+}
+
+.legend {
+  position: absolute;
+  left: clamp(8px, 1.6cqmin, 18px);
+  bottom: clamp(8px, 1.6cqmin, 18px);
+  display: grid;
+  gap: 5px;
+  max-width: 46%;
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: clamp(11px, 1.05cqw, 13px);
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  max-height: 2.4em;
+  transition: opacity 1s ease 0.6s, max-height 0.5s ease 1.4s, margin 0.5s ease 1.4s;
+}
+
+.legend-item span {
+  padding-inline: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-shadow: none;
+  background: var(--panel);
+  border-radius: 4px;
+  padding-block: 2px;
+}
+
+.legend-item.used {
+  opacity: 0;
+  max-height: 0;
+  margin-top: -5px;
+}
+
+kbd {
+  font-family: var(--ui);
+  font-weight: 600;
+  font-size: 0.9em;
+  min-width: 1.9em;
+  padding: 2px 6px;
+  text-align: center;
+  color: #2a1608;
+  background: rgba(255, 238, 214, 0.92);
+  border-radius: 4px;
+  box-shadow: 0 2px 0 rgba(60, 30, 10, 0.6);
+  flex: 0 0 auto;
+}
+
+.prompt {
+  position: absolute;
+  left: 50%;
+  bottom: clamp(14px, 6cqh, 64px);
+  translate: -50% 0;
+  width: max-content;
+  max-width: 90%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px;
+  background: var(--panel);
+  border: 1px solid rgba(255, 138, 61, 0.55);
+  border-radius: 10px;
+  border-top-left-radius: 2px;
+  font-size: clamp(13px, 1.4cqw, 17px);
+  font-weight: 600;
+  white-space: nowrap;
+  animation: prompt-in 0.4s ease;
+}
+
+.prompt-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding-inline: 0.2em;
+}
+
+@keyframes prompt-in {
+  from {
+    opacity: 0;
+    translate: -50% 8px;
+  }
+}
+
+.loading {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: radial-gradient(circle at 30% 70%, #6a3412 0%, #241208 70%);
+  color: var(--ink);
+  font-family: var(--ui);
+}
+
+.loading-inner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: clamp(13px, 1.4cqw, 16px);
+}
+
+.loading-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: pulse 1s ease-in-out infinite alternate;
+}
+
+.loading.failed .loading-dot {
+  animation: none;
+  background: #c44;
+}
+
+@keyframes pulse {
+  to {
+    opacity: 0.25;
+  }
+}
