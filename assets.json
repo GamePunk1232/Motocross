@@ -1,0 +1,207 @@
+{
+  "SKY_BACKDROP": {
+    "src": "/generated-assets/sky_backdrop.webp",
+    "kind": "image",
+    "label": "Golden hour sky",
+    "recipe": {
+      "prompt": "Use case: farthest background plate of a 2D side-view motocross game set in a forest at golden hour, 6:30 PM summer evening.\nSubject: cinematic sunset sky — warm orange near the horizon blending to golden yellow and soft peach, subtle pink in scattered wispy clouds lit from below, a little dusty blue high at the very top. A low warm sun disc sits on the horizon at about one third from the left, with a soft bloom. Along the bottom fifth: very distant pale hazy mountain ridges and forested hill silhouettes fading into warm atmospheric haze, low contrast.\nStyle: realistic, photographic, painterly-realistic like the reference, natural muted colours, not oversaturated.\nUsage contract: shown as-is behind everything, scrolls horizontally very slowly; the middle and upper area must be open sky. Bottom fifth holds only faint distant ridges.\nAvoid: trees in the foreground, any dirt track, people, vehicles, text, UI, birds, neon colours, cartoon look.",
+      "refs": [
+        "https://cdn.playabl.ai/ai-reference-images/6af669cf792a9c8188934cb6/af_1794533886765_a2i98e6.png"
+      ],
+      "playabl": {
+        "tool": "image_gen",
+        "kind": "backdrop",
+        "size": "2048x1152",
+        "scrollLoop": "horizontal",
+        "removeBackground": false,
+        "assetId": "6af66b39792a9c818893562b"
+      }
+    }
+  },
+  "FOREST_HILLS": {
+    "src": "/generated-assets/forest_hills-transparent.webp",
+    "kind": "image",
+    "label": "Forested hills layer",
+    "recipe": {
+      "prompt": "Use case: far parallax layer of a 2D side-view golden-hour forest motocross game, drawn over a separate sunset sky.\nSubject: a band of rolling forest-covered hills seen from the side, densely covered in tiny pine and oak treetops, back-lit by a low warm sun: hazy warm orange-brown with atmospheric perspective, the tree-covered hilltops catching golden rim light, a few distant pointed pine silhouettes poking above the ridge line. The hills fill the lower 60 percent of the canvas solid to the bottom edge; the area above the hill silhouette is empty.\nStyle: realistic, photographic painterly realism like the reference, soft haze, low contrast, muted warm palette.\nUsage contract: side view, tiles horizontally, the bottom edge is fully solid hill.\nAvoid: sky, clouds, sun, dirt track, people, text, crisp foreground detail, neon or saturated colour.",
+      "refs": [
+        "https://cdn.playabl.ai/ai-reference-images/6af669cf792a9c8188934cb6/af_1794533886765_a2i98e6.png"
+      ],
+      "playabl": {
+        "tool": "image_gen",
+        "kind": "backdrop",
+        "size": "2400x800",
+        "scrollLoop": "horizontal",
+        "removeBackground": true,
+        "assetId": "6af66b416a4c48ef38719ce2"
+      }
+    }
+  },
+  "PINE_TREE": {
+    "src": "/generated-assets/pine_tree-transparent.webp",
+    "kind": "image",
+    "label": "Tall pine tree",
+    "recipe": {
+      "prompt": "Use case: a single tall tree placed beside a dirt trail in a 2D side-view golden-hour forest game; scaled to different sizes for depth.\nSubject: one tall mature Scots pine seen from the side, straight reddish-brown trunk with rough bark, layered dark-green needle clusters in the upper half, a few bare lower branch stubs, small roots flaring at the base. Warm low sun from the left gives an orange-gold rim light on the left edge of the trunk and needles, cooler shadow on the right.\nStyle: realistic, photographic painterly realism like the reference, natural muted colours.\nComposition: the whole tree, full height, centered, trunk base touching the bottom of the canvas.\nAvoid: ground, grass patch, other trees, sky, text, cartoon outlines.",
+      "refs": [
+        "https://cdn.playabl.ai/ai-reference-images/6af669cf792a9c8188934cb6/af_1794533886765_a2i98e6.png"
+      ],
+      "playabl": {
+        "tool": "image_gen",
+        "kind": "sprite",
+        "size": "640x1280",
+        "removeBackground": true,
+        "assetId": "6af66b4d792a9c81889356bc"
+      }
+    }
+  },
+  "TREELINE_MID": {
+    "src": "/generated-assets/treeline_mid-transparent.webp",
+    "kind": "image",
+    "label": "Mid forest treeline",
+    "recipe": {
+      "prompt": "Use case: middle-distance parallax layer of a 2D side-view golden-hour forest motocross game, drawn in front of distant hills.\nSubject: a forest edge seen from the side: many tall pine trees of varied heights with straight trunks and layered dark-green needles, a few broad oak canopies between them, trunks rising from a continuous dark band of undergrowth along the bottom edge. Warm low sunlight from the left catches the left edges of trunks and needles with orange-gold rim light; the trees are softened by warm atmospheric haze so they read as mid-distance. Gaps of empty space between the treetops.\nStyle: realistic, photographic painterly realism like the reference, natural muted greens and warm browns.\nUsage contract: side view, tiles horizontally, bottom 20 percent is solid continuous undergrowth to the bottom edge; everything above the tree silhouettes is empty.\nAvoid: sky, sun, clouds, dirt track, people, text, fog banks, neon or saturated colour.",
+      "refs": [
+        "https://cdn.playabl.ai/ai-reference-images/6af669cf792a9c8188934cb6/af_1794533886765_a2i98e6.png"
+      ],
+      "playabl": {
+        "tool": "image_gen",
+        "kind": "backdrop",
+        "size": "2400x1024",
+        "scrollLoop": "horizontal",
+        "removeBackground": true,
+        "assetId": "6af66b48209ddc14b7ea9017"
+      }
+    }
+  },
+  "OAK_TREE": {
+    "src": "/generated-assets/oak_tree-transparent.webp",
+    "kind": "image",
+    "label": "Oak tree",
+    "recipe": {
+      "prompt": "Use case: a single tree placed beside a dirt trail in a 2D side-view golden-hour forest game; scaled to different sizes for depth.\nSubject: one mature oak tree seen from the side, thick gnarled grey-brown trunk, spreading branches and a broad rounded canopy of dense green leaves, with warm golden light catching the leaves and bark on the left side and deeper shade on the right; sunlight speckles through gaps in the canopy.\nStyle: realistic, photographic painterly realism like the reference, natural muted colours.\nComposition: the whole tree, centered, trunk base touching the bottom of the canvas.\nAvoid: ground, grass patch, other trees, sky, text, cartoon outlines.",
+      "refs": [
+        "https://cdn.playabl.ai/ai-reference-images/6af669cf792a9c8188934cb6/af_1794533886765_a2i98e6.png"
+      ],
+      "playabl": {
+        "tool": "image_gen",
+        "kind": "sprite",
+        "size": "1024x1024",
+        "removeBackground": true,
+        "assetId": "6af66b51e2bf0eba64b1e664"
+      }
+    }
+  },
+  "DIRT_TEXTURE": {
+    "src": "/generated-assets/dirt_texture.webp",
+    "kind": "image",
+    "label": "Forest dirt texture",
+    "recipe": {
+      "prompt": "Use case: tiling fill texture for the earth cross-section below the trail surface in a 2D side-view motocross game.\nSubject: rich brown forest soil seen as a flat cut face: dark loamy dirt with small embedded pebbles, tiny roots, crumbs of clay and a few flecks of decayed leaves; fine natural variation, no large features.\nStyle: realistic photographic material.\nUsage contract: seamless in both directions — left/right and top/bottom edges match; flat uniform lighting, no shadows, no highlights, no vignette, no light direction; even density across the whole image.\nAvoid: grass, sky, big rocks, text, strong contrast, repeated obvious blobs.",
+      "playabl": {
+        "tool": "image_gen",
+        "kind": "texture",
+        "size": "1024x1024",
+        "removeBackground": false,
+        "assetId": "6af66b59209ddc14b7ea907a"
+      }
+    }
+  },
+  "TRAIL_PROPS": {
+    "src": "/generated-assets/trail_props-transparent.webp",
+    "kind": "image",
+    "label": "Trail props and plants",
+    "recipe": {
+      "prompt": "Use case: object atlas of props placed along a dirt trail in a 2D side-view golden-hour forest motocross game. All seen exactly from the side, sitting on an invisible flat ground line at the bottom of each cell.\nSubject: rock-small = a fist-to-head-sized grey granite rock with lichen, rounded; rock-large = a big knee-high mossy grey boulder, wider than tall, flat bottom; log = a fallen pine log lying horizontally, seen from the side along its length, rough bark, cut end visible on the right, fills the cell width; stump = a short sawn-off tree stump with flared roots, light cut top; branch = a dead fallen branch with small twigs, lying horizontally; fern = a lush green fern clump with arching fronds; grass-tuft = a clump of tall wild grass and seed heads, golden-green; bush = a dense low leafy green shrub, wider than tall; weeds = a cluster of tall weeds with tiny yellow and white wildflowers.\nStyle: realistic, photographic painterly realism like the reference; warm low sun from the left gives orange-gold rim light on the left edges, soft shade on the right; natural muted colours.\nComposition: one object per cell, each resting on the bottom edge of its cell, filling most of the cell.\nConstraints: no ground patch under objects, no text.\nAvoid: cartoon outlines, saturated colours, cast shadows on the background.",
+      "refs": [
+        "https://cdn.playabl.ai/ai-reference-images/6af669cf792a9c8188934cb6/af_1794533886765_a2i98e6.png"
+      ],
+      "playabl": {
+        "tool": "image_gen",
+        "kind": "atlas",
+        "parts": [
+          "rock-small",
+          "rock-large",
+          "log",
+          "stump",
+          "branch",
+          "fern",
+          "grass-tuft",
+          "bush",
+          "weeds"
+        ],
+        "removeBackground": true,
+        "assetId": "6af66b596a4c48ef38719d67"
+      }
+    }
+  },
+  "BIKE_BODY": {
+    "src": "/generated-assets/bike_body-transparent.webp",
+    "kind": "image",
+    "label": "Dirt bike chassis",
+    "recipe": {
+      "prompt": "Use case: the chassis layer of an articulated dirt bike in a physics game; the wheels, the swingarm and the lower fork legs are separate sprites attached by code, so they must NOT appear in this image.\nSubject: a modern 450cc motocross bike seen exactly from the side, facing right, WITH NO WHEELS, NO TYRES, NO SWINGARM, NO REAR SHOCK, NO LOWER FORK LEGS. What remains: black steel perimeter frame, white and orange radiator shrouds and fuel tank, black seat, white side number plate with a blank panel, orange-and-white rear fender and subframe sweeping up to the back, white front fender mounted under the triple clamp, gold upper fork tubes ending just below the lower triple clamp, black handlebars with grips, grey engine block with cylinder and clutch cover, chrome header pipe curving into an aluminium silencer, footpeg below the engine. The empty spaces where the wheels would be are clearly empty.\nStyle: realistic, photographic painterly realism like the reference; warm low sun from the left gives orange-gold rim light on the left/top edges; natural colours, crisp detail.\nComposition: the chassis centered, filling most of the width, perfectly level (not tilted).\nAvoid: wheels, tyres, rims, spokes, swingarm, chain, rider, ground, shadows, text, logos, brand names, cartoon outlines.",
+      "refs": [
+        "https://cdn.playabl.ai/ai-reference-images/6af669cf792a9c8188934cb6/af_1794533886765_a2i98e6.png"
+      ],
+      "playabl": {
+        "tool": "image_gen",
+        "kind": "sprite",
+        "size": "1536x1024",
+        "facing": "right",
+        "removeBackground": true,
+        "assetId": "6af66b626a4c48ef38719da2"
+      }
+    }
+  },
+  "BIKE_PARTS": {
+    "src": "/generated-assets/bike_parts-transparent.webp",
+    "kind": "image",
+    "label": "Dirt bike moving parts",
+    "recipe": {
+      "prompt": "Use case: separate moving parts of a side-view motocross bike in a physics game; code rotates and positions each part.\nSubject: wheel = one complete motocross wheel seen exactly side-on, perfectly circular: black knobby off-road tyre with chunky square knobs all around the circumference, black anodised rim, thin silver spokes, silver hub, and a wavy silver brake disc; a little dry dust on the tyre. swingarm = a silver aluminium motocross swingarm seen from the side, lying perfectly horizontal: thick pivot end on the left, tapering to the axle slot on the right, a black chain slider on top; no wheel, no chain. fork-lower = one lower fork leg of a motocross fork seen from the side, standing perfectly vertical: polished gold-anodised stanchion tube at the top, black lower leg below it with a black fork guard, ending at the bottom in the axle clamp; no wheel.\nStyle: realistic, photographic painterly realism like the reference; warm low sun from the left gives orange-gold rim light on the left edges.\nComposition: one part per cell, centered, filling the cell along its long axis; the wheel fills the cell as a full circle.\nAvoid: ground, shadows, text, logos, cartoon outlines, perspective tilt.",
+      "refs": [
+        "https://cdn.playabl.ai/ai-reference-images/6af669cf792a9c8188934cb6/af_1794533886765_a2i98e6.png"
+      ],
+      "playabl": {
+        "tool": "image_gen",
+        "kind": "atlas",
+        "parts": [
+          "wheel",
+          "swingarm",
+          "fork-lower"
+        ],
+        "removeBackground": true,
+        "assetId": "6af66b6c792a9c818893576b"
+      }
+    }
+  },
+  "RIDER_PARTS": {
+    "src": "/generated-assets/rider_parts-transparent.webp",
+    "kind": "image",
+    "label": "Rider body parts",
+    "recipe": {
+      "prompt": "Use case: separate body segments of a motocross rider ragdoll in a side-view physics game; code rotates each segment along its bone, so every limb segment must be drawn STANDING PERFECTLY VERTICAL, with the end nearest the body at the top of the cell.\nSubject: helmet = a full-face motocross helmet seen from the right side, facing right: orange and navy-blue shell, long peaked visor, chin bar pointing right, goggles with a tinted lens over the eye port, no neck below; torso = the rider's torso from shoulders down to the hips seen from the right side, upright, facing right: navy-blue and orange long-sleeve motocross jersey with a chest protector bulge, the top of grey riding pants at the bottom, no head, no arms, no legs; upper-arm = one upper arm vertical, shoulder at top, elbow at bottom, navy jersey sleeve with an orange stripe; forearm = one forearm vertical, elbow at top, wrist at bottom, navy jersey sleeve with orange cuff, no hand; glove = one gloved hand in a gripping fist seen from the side, black and orange motocross glove, knuckles at the top; thigh = one thigh vertical, hip at top, knee at bottom, grey motocross pants with an orange panel; shin = one lower leg vertical, knee at top, ankle at bottom, grey pants tucked into the top of a tall white boot with knee brace; boot = one tall-ankle white motocross boot foot seen from the right side, toe pointing right, black sole with a steel shank, buckles.\nStyle: realistic, photographic painterly realism like the reference; warm low sun from the left gives orange-gold rim light on the left edges; natural colours, crisp detail.\nComposition: one segment per cell, centered, consistent human proportions, each vertical segment filling the cell height.\nAvoid: full body, extra limbs, ground, shadows, text, logos, numbers, cartoon outlines.",
+      "refs": [
+        "https://cdn.playabl.ai/ai-reference-images/6af669cf792a9c8188934cb6/af_1794533886765_a2i98e6.png"
+      ],
+      "playabl": {
+        "tool": "image_gen",
+        "kind": "atlas",
+        "parts": [
+          "helmet",
+          "torso",
+          "upper-arm",
+          "forearm",
+          "glove",
+          "thigh",
+          "shin",
+          "boot"
+        ],
+        "facing": "right",
+        "removeBackground": true,
+        "assetId": "6af66b75db710c3ae4e492c7"
+      }
+    }
+  }
+}
