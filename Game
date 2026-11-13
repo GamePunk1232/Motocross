@@ -1,0 +1,3154 @@
+// Loads every picture the game draws through the Playabl asset handle, reads
+// the slicing sidecars, and prepares tinted copies (hazed distant trees, the
+// shaded far-side limbs) once, so drawing never filters per frame.
+import manifest from "../assets.json";
+
+const IMAGE_KEYS = [
+  "SKY_BACKDROP", "FOREST_HILLS", "TREELINE_MID", "PINE_TREE", "OAK_TREE",
+  "TRAIL_PROPS", "DIRT_TEXTURE", "BIKE_BODY", "BIKE_PARTS", "RIDER_PARTS",
+];
+const SHEETS = ["TRAIL_PROPS", "BIKE_PARTS", "RIDER_PARTS"];
+const CUTOUTS = ["FOREST_HILLS", "TREELINE_MID", "PINE_TREE", "OAK_TREE", "TRAIL_PROPS", "BIKE_BODY", "BIKE_PARTS", "RIDER_PARTS"];
+
+function loadImage(key, url) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.decoding = "async";
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error(`Image ${key} failed to load`));
+    img.src = url;
+  });
+}
+
+function toCanvas(img) {
+  const c = document.createElement("canvas");
+  c.width = img.naturalWidth || img.width;
+  c.height = img.naturalHeight || img.height;
+  c.getContext("2d").drawImage(img, 0, 0);
+  return c;
+}
+
+// Chroma-key fringes: pull neon green spill back to the neighbouring warm tones.
+function despill(canvas) {
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  const data = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const d = data.data;
+  for (let i = 0; i < d.length; i += 4) {
+    if (d[i + 3] === 0) continue;
+    const r = d[i], g = d[i + 1], b = d[i + 2];
+    const m = Math.max(r, b);
+    const spill = g - m;
+    if (spill > 38) {
+      // Re-light the pixel as a warm sunlit leaf of the same brightness.
+      const L = 0.3 * r + 0.59 * g + 0.11 * b;
+      const k = Math.min(1, (spill - 38) / 60);
+      d[i] = r + (L * 0.92 - r) * k;
+      d[i + 1] = g + (L * 0.8 - g) * k;
+      d[i + 2] = b + (L * 0.38 - b) * k;
+    }
+  }
+  ctx.putImageData(data, 0, 0);
+  return canvas;
+}
+
+export function tinted(source, color, alpha) {
+  const c = document.createElement("canvas");
+  c.width = source.width;
+  c.height = source.height;
+  const ctx = c.getContext("2d");
+  ctx.drawImage(source, 0, 0);
+  ctx.globalCompositeOperation = "source-atop";
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = color;
+  ctx.fillRect(0, 0, c.width, c.height);
+  return c;
+}
+
+export async function loadArt(assets) {
+  const urls = Object.fromEntries(IMAGE_KEYS.map((k) => [k, assets ? assets.get(k) : manifest[k].src]));
+  const [images, frames] = await Promise.all([
+    Promise.all(IMAGE_KEYS.map((k) => loadImage(k, urls[k]))),
+    Promise.all(
+      SHEETS.map(async (k) => {
+        const res = await fetch(manifest[k].src.replace(/\.(webp|png)$/, ".frames.json"));
+        if (!res.ok) throw new Error(`Frames for ${k} failed to load`);
+        const json = await res.json();
+        return Object.fromEntries(json.frames.map((f) => [f.name, f]));
+      }),
+    ),
+  ]);
+  const art = {};
+  IMAGE_KEYS.forEach((k, i) => {
+    art[k] = CUTOUTS.includes(k) ? despill(toCanvas(images[i])) : images[i];
+  });
+  const frame = Object.fromEntries(SHEETS.map((k, i) => [k, frames[i]]));
+
+  // Distance haze for tree layers, and shade for the limbs on the far side.
+  art.haze = {
+    PINE_TREE: [tinted(art.PINE_TREE, "#c9864a", 0.62), tinted(art.PINE_TREE, "#a8683a", 0.42), tinted(art.PINE_TREE, "#2a1a0e", 0.18)],
+    OAK_TREE: [tinted(art.OAK_TREE, "#c9864a", 0.62), tinted(art.OAK_TREE, "#a8683a", 0.42), tinted(art.OAK_TREE, "#2a1a0e", 0.18)],
+  };
+  art.propsShade = tinted(art.TRAIL_PROPS, "#1d120a", 0.55);
+  art.propsBack = tinted(art.TRAIL_PROPS, "#6b4524", 0.25);
+  art.riderFar = tinted(art.RIDER_PARTS, "#140c08", 0.45);
+  art.bikeFar = tinted(art.BIKE_PARTS, "#140c08", 0.25);
+  return { art, frame };
+}
+// Synthesised sound: a single-cylinder engine whose pitch follows the
+// simulated RPM, wind that rises with speed, an evening forest bed with the
+// odd bird, and impacts whose weight follows the physics impulse.
+export function createAudio(sdk) {
+  let audio = null;
+  let ctx = null;
+  let nodes = null;
+  let volume = 0.8;
+  let muted = false;
+  let birdTimer = 3;
+
+  sdk.audio
+    .getContext()
+    .then((a) => {
+      audio = a;
+      ctx = a.context;
+      build();
+    })
+    .catch(() => {});
+
+  function noiseBuffer(seconds) {
+    const len = Math.floor(ctx.sampleRate * seconds);
+    const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    let b = 0;
+    for (let i = 0; i < len; i++) {
+      // Lightly pinked noise: less hiss, more body.
+      const w = Math.random() * 2 - 1;
+      b = 0.97 * b + 0.03 * w;
+      d[i] = w * 0.45 + b * 3.2;
+    }
+    return buf;
+  }
+
+  function loopNoise() {
+    const src = ctx.createBufferSource();
+    src.buffer = nodes.noise;
+    src.loop = true;
+    src.loopStart = Math.random();
+    src.start(0, Math.random() * 1.5);
+    return src;
+  }
+
+  function build() {
+    nodes = {};
+    nodes.master = ctx.createGain();
+    nodes.master.gain.value = muted ? 0 : volume;
+    nodes.master.connect(ctx.destination);
+    nodes.noise = noiseBuffer(2.5);
+
+    // Engine: crank-rate saw + half-rate square (the four-stroke thump) through a soft clipper.
+    const e = {};
+    e.saw = ctx.createOscillator();
+    e.saw.type = "sawtooth";
+    e.sub = ctx.createOscillator();
+    e.sub.type = "square";
+    e.saw2 = ctx.createOscillator();
+    e.saw2.type = "sawtooth";
+    e.saw2.detune.value = 9;
+    e.mix = ctx.createGain();
+    e.mix.gain.value = 0.5;
+    e.shaper = ctx.createWaveShaper();
+    const curve = new Float32Array(1024);
+    for (let i = 0; i < 1024; i++) {
+      const x = (i / 1023) * 2 - 1;
+      curve[i] = Math.tanh(x * 2.6);
+    }
+    e.shaper.curve = curve;
+    e.lp = ctx.createBiquadFilter();
+    e.lp.type = "lowpass";
+    e.lp.Q.value = 2.5;
+    e.gain = ctx.createGain();
+    e.gain.gain.value = 0;
+    const subGain = ctx.createGain();
+    subGain.gain.value = 0.8;
+    const saw2Gain = ctx.createGain();
+    saw2Gain.gain.value = 0.35;
+    e.saw.connect(e.mix);
+    e.sub.connect(subGain).connect(e.mix);
+    e.saw2.connect(saw2Gain).connect(e.mix);
+    e.mix.connect(e.shaper).connect(e.lp).connect(e.gain).connect(nodes.master);
+    // Exhaust roar: band-limited noise that opens with the throttle.
+    e.roar = loopNoise();
+    e.roarBp = ctx.createBiquadFilter();
+    e.roarBp.type = "bandpass";
+    e.roarBp.Q.value = 1.2;
+    e.roarGain = ctx.createGain();
+    e.roarGain.gain.value = 0;
+    e.roar.connect(e.roarBp).connect(e.roarGain).connect(nodes.master);
+    e.saw.start();
+    e.sub.start();
+    e.saw2.start();
+    nodes.engine = e;
+
+    // Wind past the helmet.
+    const w = {};
+    w.src = loopNoise();
+    w.hp = ctx.createBiquadFilter();
+    w.hp.type = "highpass";
+    w.hp.frequency.value = 380;
+    w.gain = ctx.createGain();
+    w.gain.gain.value = 0;
+    w.src.connect(w.hp).connect(w.gain).connect(nodes.master);
+    nodes.wind = w;
+
+    // Forest bed: low breathing wind in the pines.
+    const a = {};
+    a.src = loopNoise();
+    a.lp = ctx.createBiquadFilter();
+    a.lp.type = "lowpass";
+    a.lp.frequency.value = 520;
+    a.gain = ctx.createGain();
+    a.gain.gain.value = 0.05;
+    a.src.connect(a.lp).connect(a.gain).connect(nodes.master);
+    nodes.amb = a;
+
+    // Tyre on loose dirt.
+    const d = {};
+    d.src = loopNoise();
+    d.bp = ctx.createBiquadFilter();
+    d.bp.type = "bandpass";
+    d.bp.frequency.value = 900;
+    d.bp.Q.value = 0.7;
+    d.gain = ctx.createGain();
+    d.gain.gain.value = 0;
+    d.src.connect(d.bp).connect(d.gain).connect(nodes.master);
+    nodes.dirt = d;
+  }
+
+  const running = () => nodes && ctx && ctx.state === "running";
+
+  function unlock() {
+    if (audio) audio.unlock().catch(() => {});
+  }
+
+  function setVolume(v, m) {
+    volume = v;
+    muted = m;
+    if (nodes) nodes.master.gain.setTargetAtTime(muted ? 0 : volume, ctx.currentTime, 0.05);
+  }
+
+  // Called every frame from update with the simulation's summary.
+  function update(dt, s) {
+    if (!running()) return;
+    const t = ctx.currentTime;
+    const e = nodes.engine;
+    const f = s.rpm / 60;
+    const on = s.engineOn ? 1 : 0;
+    e.saw.frequency.setTargetAtTime(f, t, 0.02);
+    e.saw2.frequency.setTargetAtTime(f * 2, t, 0.02);
+    e.sub.frequency.setTargetAtTime(f / 2, t, 0.02);
+    e.lp.frequency.setTargetAtTime(180 + s.throttle * 1500 + (s.rpm / 12000) * 900, t, 0.03);
+    e.gain.gain.setTargetAtTime(on * (0.07 + s.throttle * 0.11), t, 0.04);
+    e.roarBp.frequency.setTargetAtTime(220 + f * 3, t, 0.03);
+    e.roarGain.gain.setTargetAtTime(on * s.throttle * 0.06, t, 0.05);
+    nodes.wind.gain.gain.setTargetAtTime(Math.min(0.22, (s.speed / 28) ** 2 * 0.2), t, 0.1);
+    nodes.dirt.gain.gain.setTargetAtTime(Math.min(0.14, s.slip * 0.02 + s.rolling * 0.003), t, 0.05);
+    const breathe = 0.04 + 0.025 * Math.sin(s.time * 0.21) + 0.015 * Math.sin(s.time * 0.53);
+    nodes.amb.gain.gain.setTargetAtTime(breathe, t, 0.3);
+
+    birdTimer -= dt;
+    if (birdTimer <= 0) {
+      birdTimer = 3 + Math.random() * 7;
+      bird();
+    }
+  }
+
+  function bird() {
+    const t0 = ctx.currentTime;
+    const notes = 2 + Math.floor(Math.random() * 4);
+    const base = 2400 + Math.random() * 1600;
+    for (let i = 0; i < notes; i++) {
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      const st = t0 + i * (0.09 + Math.random() * 0.06);
+      o.type = "sine";
+      o.frequency.setValueAtTime(base * (1 + Math.random() * 0.2), st);
+      o.frequency.exponentialRampToValueAtTime(base * (1.25 + Math.random() * 0.3), st + 0.07);
+      g.gain.setValueAtTime(0.0001, st);
+      g.gain.exponentialRampToValueAtTime(0.018, st + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, st + 0.08);
+      o.connect(g).connect(nodes.master);
+      o.start(st);
+      o.stop(st + 0.1);
+    }
+  }
+
+  // A thump with a burst of dirt; `weight` 0..1.
+  function thud(weight, low = 1) {
+    if (!running()) return;
+    const t0 = ctx.currentTime;
+    const w = Math.min(1, weight);
+    const o = ctx.createOscillator();
+    const og = ctx.createGain();
+    o.type = "sine";
+    o.frequency.setValueAtTime(95 * low, t0);
+    o.frequency.exponentialRampToValueAtTime(42 * low, t0 + 0.22);
+    og.gain.setValueAtTime(0.0001, t0);
+    og.gain.exponentialRampToValueAtTime(0.5 * w + 0.05, t0 + 0.008);
+    og.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.32);
+    o.connect(og).connect(nodes.master);
+    o.start(t0);
+    o.stop(t0 + 0.35);
+    const n = ctx.createBufferSource();
+    n.buffer = nodes.noise;
+    const lp = ctx.createBiquadFilter();
+    lp.type = "lowpass";
+    lp.frequency.value = 900 + w * 1400;
+    const ng = ctx.createGain();
+    ng.gain.setValueAtTime(0.0001, t0);
+    ng.gain.exponentialRampToValueAtTime(0.35 * w + 0.03, t0 + 0.005);
+    ng.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.18 + w * 0.2);
+    n.connect(lp).connect(ng).connect(nodes.master);
+    n.start(t0, Math.random() * 2);
+    n.stop(t0 + 0.45);
+  }
+
+  // Plastic and metal hitting the ground.
+  function clank(weight) {
+    if (!running()) return;
+    thud(weight * 0.7, 1.3);
+    const t0 = ctx.currentTime;
+    const w = Math.min(1, weight);
+    for (const fr of [430, 1130, 1870]) {
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      o.type = "triangle";
+      o.frequency.value = fr * (0.9 + Math.random() * 0.2);
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.exponentialRampToValueAtTime(0.05 * w + 0.01, t0 + 0.004);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.12 + Math.random() * 0.15);
+      o.connect(g).connect(nodes.master);
+      o.start(t0);
+      o.stop(t0 + 0.32);
+    }
+    const n = ctx.createBufferSource();
+    n.buffer = nodes.noise;
+    const bp = ctx.createBiquadFilter();
+    bp.type = "bandpass";
+    bp.frequency.value = 2600;
+    bp.Q.value = 3;
+    const ng = ctx.createGain();
+    ng.gain.setValueAtTime(0.0001, t0);
+    ng.gain.exponentialRampToValueAtTime(0.16 * w + 0.02, t0 + 0.003);
+    ng.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.25);
+    n.connect(bp).connect(ng).connect(nodes.master);
+    n.start(t0, Math.random() * 2);
+    n.stop(t0 + 0.3);
+  }
+
+  // UI blip for a new personal best.
+  function chime() {
+    if (!running()) return;
+    const t0 = ctx.currentTime;
+    [660, 880, 1320].forEach((fr, i) => {
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      o.type = "sine";
+      o.frequency.value = fr;
+      const st = t0 + i * 0.07;
+      g.gain.setValueAtTime(0.0001, st);
+      g.gain.exponentialRampToValueAtTime(0.06, st + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, st + 0.35);
+      o.connect(g).connect(nodes.master);
+      o.start(st);
+      o.stop(st + 0.4);
+    });
+  }
+
+  return {
+    unlock, update, thud, clank, chime, setVolume,
+    destroy() {
+      if (nodes) nodes.master.disconnect();
+    },
+  };
+}
+// The dirt bike as a machine: a heavy chassis, a telescopic fork that slides
+// on a prismatic joint, a swingarm on a pivot, two wheels on bearings. The
+// springs and dampers are forces computed every physics step; the engine is a
+// torque at the rear axle. Nothing here keeps the bike upright.
+import * as planck from "planck";
+import { clamp, wrapAngle } from "./rng.js";
+
+export const CAT_GROUND = 0x0001;
+export const CAT_BIKE = 0x0002;
+export const CAT_RIDER = 0x0004;
+
+// Chassis sprite pixels → bike-local metres (origin between the axles).
+export const BIKE_SPRITE = { ox: 735, oy: 600, pxPerM: 703 };
+const P = (px, py) => ({ x: (px - BIKE_SPRITE.ox) / BIKE_SPRITE.pxPerM, y: -(py - BIKE_SPRITE.oy) / BIKE_SPRITE.pxPerM });
+
+const forkLen = Math.hypot(275, 555);
+export const GEOM = {
+  wheelR: 0.345,
+  pivot: P(575, 515),
+  rearAxle: P(215, 665),
+  frontAxle: P(1255, 665),
+  forkUp: { x: -275 / forkLen, y: 555 / forkLen }, // compression direction
+  peg: P(625, 655),
+  grip: P(872, 40),
+  sprocket: P(700, 556),
+  frontTravel: 0.3,
+  frontSag: 0.06,
+  rearTravel: 0.32,
+  rearSag: 0.09,
+};
+GEOM.swingLen = Math.hypot(GEOM.rearAxle.x - GEOM.pivot.x, GEOM.rearAxle.y - GEOM.pivot.y);
+// Swingarm angle relative to the chassis at full droop: the body's local
+// (-L, 0) points at the axle.
+const nominalSwing = wrapAngle(Math.atan2(GEOM.rearAxle.y - GEOM.pivot.y, GEOM.rearAxle.x - GEOM.pivot.x) - Math.PI);
+GEOM.swingRest = nominalSwing + GEOM.rearSag / GEOM.swingLen;
+GEOM.frontAxleExt = {
+  x: GEOM.frontAxle.x - GEOM.forkUp.x * GEOM.frontSag,
+  y: GEOM.frontAxle.y - GEOM.forkUp.y * GEOM.frontSag,
+};
+
+// Convex collision hulls of the chassis (frame/engine, subframe, bars, fender).
+const HULLS = [
+  [P(480, 330), P(950, 230), P(1010, 520), P(900, 690), P(620, 700), P(520, 560)],
+  [P(10, 262), P(500, 255), P(560, 470), P(200, 480)],
+  [P(850, 18), P(960, 60), P(1010, 300), P(900, 280)],
+  [P(1030, 250), P(1438, 330), P(1100, 312)],
+];
+
+const rot = (p, a) => ({ x: p.x * Math.cos(a) - p.y * Math.sin(a), y: p.x * Math.sin(a) + p.y * Math.cos(a) });
+
+export function localToWorld(origin, angle, p) {
+  const r = rot(p, angle);
+  return { x: origin.x + r.x, y: origin.y + r.y };
+}
+
+function setMass(body, mass, center, inertiaAboutCenter) {
+  body.setMassData({
+    mass,
+    center: planck.Vec2(center.x, center.y),
+    I: inertiaAboutCenter + mass * (center.x * center.x + center.y * center.y),
+  });
+}
+
+const bikeFilter = { filterCategoryBits: CAT_BIKE, filterMaskBits: CAT_GROUND | CAT_RIDER, filterGroupIndex: -1 };
+
+// Builds the bike at rest pose with the chassis origin at `origin`, tilted by `angle`.
+export function createBike(world, origin, angle) {
+  const W = (p) => planck.Vec2(localToWorld(origin, angle, p));
+
+  const chassis = world.createBody({ type: "dynamic", position: planck.Vec2(origin.x, origin.y), angle, bullet: true });
+  for (const hull of HULLS) {
+    chassis.createFixture(new planck.PolygonShape(hull.map((p) => planck.Vec2(p.x, p.y))), {
+      density: 1, friction: 0.45, restitution: 0.12, ...bikeFilter, userData: { part: "chassis" },
+    });
+  }
+  setMass(chassis, 86, { x: 0.0, y: 0.1 }, 14);
+
+  // Swingarm: origin at the pivot, axle at local (-L, 0).
+  const L = GEOM.swingLen;
+  const swingAngle = angle + GEOM.swingRest;
+  const swing = world.createBody({ type: "dynamic", position: W(GEOM.pivot), angle: swingAngle });
+  swing.createFixture(new planck.BoxShape(L / 2, 0.04, planck.Vec2(-L / 2, 0), 0), {
+    density: 1, friction: 0.4, ...bikeFilter, userData: { part: "swingarm" },
+  });
+  setMass(swing, 4.5, { x: -L * 0.45, y: 0 }, 4.5 * L * L / 12);
+  const pivotJoint = world.createJoint(new planck.RevoluteJoint({
+    bodyA: chassis, bodyB: swing,
+    localAnchorA: planck.Vec2(GEOM.pivot.x, GEOM.pivot.y), localAnchorB: planck.Vec2(0, 0),
+    referenceAngle: GEOM.swingRest,
+    enableLimit: true, lowerAngle: -GEOM.rearTravel / L, upperAngle: 0,
+  }));
+
+  // Fork lower leg: origin at the front axle, slides along the fork axis.
+  const forkAngle = Math.atan2(-GEOM.forkUp.x, GEOM.forkUp.y);
+  const fork = world.createBody({ type: "dynamic", position: W(GEOM.frontAxleExt), angle });
+  fork.createFixture(new planck.BoxShape(0.035, 0.17, planck.Vec2(GEOM.forkUp.x * 0.17, GEOM.forkUp.y * 0.17), forkAngle), {
+    density: 1, friction: 0.4, ...bikeFilter, userData: { part: "fork" },
+  });
+  setMass(fork, 3, { x: GEOM.forkUp.x * 0.15, y: GEOM.forkUp.y * 0.15 }, 0.03);
+  const forkJoint = world.createJoint(new planck.PrismaticJoint({
+    bodyA: chassis, bodyB: fork,
+    localAnchorA: planck.Vec2(GEOM.frontAxleExt.x, GEOM.frontAxleExt.y), localAnchorB: planck.Vec2(0, 0),
+    localAxisA: planck.Vec2(GEOM.forkUp.x, GEOM.forkUp.y), referenceAngle: 0,
+    enableLimit: true, lowerTranslation: 0, upperTranslation: GEOM.frontTravel,
+  }));
+
+  const makeWheel = (pos, mass, part) => {
+    const wheel = world.createBody({ type: "dynamic", position: pos, angle: 0, bullet: true });
+    wheel.createFixture(new planck.CircleShape(GEOM.wheelR), {
+      density: 1, friction: 1.1, restitution: 0.12, ...bikeFilter, userData: { part, wheel: true },
+    });
+    setMass(wheel, mass, { x: 0, y: 0 }, 0.55 * mass * GEOM.wheelR * GEOM.wheelR);
+    wheel.setAngularDamping(0.04);
+    return wheel;
+  };
+  const rearPos = W(localToWorldRel(GEOM.pivot, GEOM.swingRest, { x: -L, y: 0 }));
+  const rearWheel = makeWheel(rearPos, 10.5, "rearWheel");
+  const frontWheel = makeWheel(W(GEOM.frontAxleExt), 9, "frontWheel");
+  const rearHub = world.createJoint(new planck.RevoluteJoint({
+    bodyA: swing, bodyB: rearWheel,
+    localAnchorA: planck.Vec2(-L, 0), localAnchorB: planck.Vec2(0, 0),
+    enableMotor: true, maxMotorTorque: 0, motorSpeed: 0,
+  }));
+  const frontHub = world.createJoint(new planck.RevoluteJoint({
+    bodyA: fork, bodyB: frontWheel,
+    localAnchorA: planck.Vec2(0, 0), localAnchorB: planck.Vec2(0, 0),
+    enableMotor: true, maxMotorTorque: 0, motorSpeed: 0,
+  }));
+
+  return {
+    chassis, swing, fork, rearWheel, frontWheel, pivotJoint, forkJoint, rearHub, frontHub,
+    bodies: [chassis, swing, fork, rearWheel, frontWheel],
+    rearContacts: 0, frontContacts: 0,
+    throttle: 0, rpm: 1700, gear: 1, reverse: false, reverseHold: 0, frontComp: 0, rearComp: 0, speedAlong: 0,
+  };
+}
+
+// A point given in a sub-frame (origin `o`, rotated `a`) expressed in bike-local metres.
+function localToWorldRel(o, a, p) {
+  const r = rot(p, a);
+  return { x: o.x + r.x, y: o.y + r.y };
+}
+
+const GEAR_TOP = [0, 30, 45, 62, 79, 96]; // wheel rad/s at the rev limit per gear
+const REDLINE = 12000;
+const IDLE = 1700;
+
+// Per physics step: engine, brakes, springs, dampers, air drag.
+export function driveBike(bike, input, tune, h) {
+  const { chassis, swing, fork, rearHub, frontHub, pivotJoint, forkJoint } = bike;
+
+  // Twist of the wrist: the throttle opens and closes over a few hundredths of a second.
+  const target = input.throttle ? 1 : 0;
+  bike.throttle += clamp(target - bike.throttle, -h * 10, h * 1.8);
+
+  const wheelSpin = -rearHub.getJointSpeed(); // forward rotation is clockwise
+  const speedAlong = planck.Vec2.dot(chassis.getLinearVelocity(), chassis.getWorldVector(planck.Vec2(1, 0)));
+
+  // Reverse: hold the brake once stopped and the bike creeps backwards.
+  if (input.brake && Math.abs(speedAlong) < 0.6) bike.reverseHold += h;
+  else if (!input.brake) bike.reverseHold = 0;
+  bike.reverse = input.brake && bike.reverseHold > 0.45;
+
+  const maxT = 400 * tune.enginePower;
+  const power = 30000 * tune.enginePower;
+  const omegaMax = GEAR_TOP[5];
+  if (bike.reverse) {
+    rearHub.setMotorSpeed(6.5);
+    rearHub.setMaxMotorTorque(260);
+  } else if (input.brake) {
+    rearHub.setMotorSpeed(0);
+    rearHub.setMaxMotorTorque(520 * tune.brake);
+  } else if (bike.throttle > 0.01) {
+    const w = Math.max(wheelSpin, 1);
+    const limiter = clamp(1 - Math.pow(Math.max(0, w) / omegaMax, 6), 0, 1);
+    const torque = Math.min(maxT, power / w) * limiter * bike.throttle;
+    rearHub.setMotorSpeed(-omegaMax);
+    rearHub.setMaxMotorTorque(torque);
+  } else {
+    // Engine braking with the clutch out; the clutch is pulled near a stop.
+    rearHub.setMotorSpeed(0);
+    rearHub.setMaxMotorTorque(Math.abs(wheelSpin) > 4 ? 55 : 3);
+  }
+  frontHub.setMotorSpeed(0);
+  frontHub.setMaxMotorTorque(input.brake && !bike.reverse ? 760 * tune.brake : 1.5);
+
+  // Fork: progressive spring plus compression/rebound damping along the tube.
+  const t = forkJoint.getJointTranslation();
+  const tv = forkJoint.getJointSpeed();
+  const ft = GEOM.frontTravel;
+  let fForce = tune.frontSpring * (t + 0.016) * (1 + 2.4 * Math.pow(Math.max(0, t) / ft, 3));
+  fForce += tv > 0 ? 680 * tune.damping * tv : 1150 * tune.damping * tv;
+  const axis = chassis.getWorldVector(planck.Vec2(GEOM.forkUp.x, GEOM.forkUp.y));
+  const forkPoint = fork.getWorldCenter();
+  fork.applyForce(planck.Vec2(-axis.x * fForce, -axis.y * fForce), forkPoint, true);
+  chassis.applyForce(planck.Vec2(axis.x * fForce, axis.y * fForce), forkPoint, true);
+  bike.frontComp = t / ft;
+
+  // Shock: expressed at the axle, applied as a torque about the swingarm pivot.
+  const L = GEOM.swingLen;
+  const c = -pivotJoint.getJointAngle() * L;
+  const cv = -pivotJoint.getJointSpeed() * L;
+  const rt = GEOM.rearTravel;
+  let rForce = tune.rearSpring * (c + 0.02) * (1 + 1.8 * Math.pow(Math.max(0, c) / rt, 2));
+  rForce += cv > 0 ? 900 * tune.damping * cv : 1500 * tune.damping * cv;
+  const torque = rForce * L;
+  swing.applyTorque(torque, true);
+  chassis.applyTorque(-torque, true);
+  bike.rearComp = c / rt;
+
+  // Air drag on bike and rider.
+  const v = chassis.getLinearVelocity();
+  const sp = v.length();
+  if (sp > 0.1) {
+    const k = 0.5 * 1.2 * 0.62 * sp;
+    chassis.applyForceToCenter(planck.Vec2(-v.x * k, -v.y * k), true);
+  }
+
+  // Engine speed for the sound: a 5-speed box that shifts on its own.
+  const absSpin = Math.abs(wheelSpin);
+  if (bike.gear < 5 && absSpin > GEAR_TOP[bike.gear] * 0.93) bike.gear++;
+  else if (bike.gear > 1 && absSpin < GEAR_TOP[bike.gear - 1] * 0.55) bike.gear--;
+  const fromWheel = (absSpin / GEAR_TOP[bike.gear]) * REDLINE;
+  const clutchSlip = IDLE + bike.throttle * 6500;
+  const targetRpm = clamp(Math.max(fromWheel, absSpin < 8 ? clutchSlip * (1 - absSpin / 8) + fromWheel : IDLE), IDLE, REDLINE);
+  bike.rpm += (targetRpm - bike.rpm) * Math.min(1, h * 14);
+  bike.speedAlong = speedAlong;
+  void swing;
+}
+
+export function bikeSpeed(bike) {
+  return bike.chassis.getLinearVelocity().length();
+}
+// Side-on follow camera. Leads the bike in the direction of travel, and when
+// rider and bike part ways it pulls back to keep both in frame.
+import { clamp } from "./rng.js";
+
+export function createCamera(x, y) {
+  return { x, y, ppm: 60, shake: 0, shakeT: 0, ox: 0, oy: 0 };
+}
+
+export function updateCamera(cam, sim, dt, size, opts) {
+  const { W, H } = size;
+  if (!W || !H) return;
+  const bike = sim.bike.chassis;
+  const bp = bike.getPosition();
+  const bv = bike.getLinearVelocity();
+  const view = opts.viewWidth;
+  // Desktop frames show `view` metres across; narrow frames never less than 12 m.
+  let ppm = Math.min(W / 12, Math.max(W / view, H / (view * 0.56)));
+  let tx;
+  let ty;
+  if (sim.rider.mode === "riding") {
+    tx = bp.x + clamp(bv.x * opts.lookAhead, -2.5, 4.5);
+    ty = bp.y + 1.5 + clamp(bv.y * 0.12, -1.5, 1.5);
+  } else {
+    const t = sim.rider.bodies.torso.getPosition();
+    tx = (bp.x + t.x) / 2;
+    ty = (bp.y + t.y) / 2 + 1.0;
+    const spanX = Math.abs(bp.x - t.x) + 9;
+    const spanY = Math.abs(bp.y - t.y) + 6;
+    ppm = Math.min(ppm, W / spanX, H / spanY);
+  }
+  const kx = 1 - Math.exp(-dt * 4.5);
+  const ky = 1 - Math.exp(-dt * 3.2);
+  const kz = 1 - Math.exp(-dt * 1.8);
+  cam.x += (tx - cam.x) * kx;
+  cam.y += (ty - cam.y) * ky;
+  cam.ppm += (ppm - cam.ppm) * kz;
+  // Impact shake decays quickly; a tiny world-space jitter, never a spin.
+  cam.shake *= Math.exp(-dt * 7);
+  cam.shakeT += dt * 38;
+  cam.ox = Math.sin(cam.shakeT * 1.3) * cam.shake * 0.12;
+  cam.oy = Math.cos(cam.shakeT * 1.7) * cam.shake * 0.12;
+}
+
+export function snapCamera(cam, sim) {
+  const p = sim.bike.chassis.getPosition();
+  cam.x = p.x;
+  cam.y = p.y + 1.1;
+}
+// The game's Creator Tools vocabulary: what exists (catalog), what is on
+// screen (describeScene), and what the editor may drive. Node ids are stable.
+import { SECTIONS } from "./track.js";
+
+export function createDevtools({ mount, game }) {
+  const rectOf = (el) => {
+    const r = el.getBoundingClientRect();
+    return { x: r.left, y: r.top, w: r.width, h: r.height };
+  };
+
+  return {
+    game: "Last Light MX",
+
+    catalog({ definition, keysFor }) {
+      return {
+        levels: [],
+        screens: [],
+        definitions: [
+          definition("def:bike", "Dirt bike", { tweakKeys: keysFor("def:bike"), nodeKinds: ["bike"], sprite: "BIKE_BODY", category: "characters" }),
+          definition("def:rider", "Rider", { tweakKeys: keysFor("def:rider"), nodeKinds: ["rider"], sprite: "RIDER_PARTS", spriteFrame: "helmet", category: "characters" }),
+          definition("def:terrain", "Forest trail", { tweakKeys: keysFor("def:terrain"), nodeKinds: ["terrain"], sprite: "DIRT_TEXTURE", category: "world" }),
+          definition("def:trail-props", "Rocks and logs", { tweakKeys: keysFor("def:trail-props"), nodeKinds: ["prop"], sprite: "TRAIL_PROPS", spriteFrame: "rock_large", singleton: false, category: "hazards" }),
+          definition("def:forest", "Forest", { tweakKeys: keysFor("def:forest"), nodeKinds: ["forest"], sprite: "PINE_TREE", category: "world" }),
+          definition("def:backdrop", "Sunset sky", { tweakKeys: keysFor("def:backdrop"), nodeKinds: ["backdrop"], sprite: "SKY_BACKDROP", category: "world" }),
+          definition("def:dust", "Dust and roost", { tweakKeys: keysFor("def:dust"), nodeKinds: ["dust"], category: "effects" }),
+          definition("def:camera", "Camera", { tweakKeys: keysFor("def:camera"), nodeKinds: ["camera"], category: "system" }),
+          definition("def:hud", "HUD", { tweakKeys: keysFor("def:hud"), nodeKinds: ["hud-speed", "hud-records", "hud-legend", "hud-prompt"], category: "interface" }),
+        ],
+      };
+    },
+
+    describeScene() {
+      const nodes = [];
+      const r = mount.getBoundingClientRect();
+      const full = { x: r.left, y: r.top, w: r.width, h: r.height };
+      nodes.push({ id: "backdrop", defId: "def:backdrop", kind: "backdrop", label: "Sunset sky", rect: full, instance: {} });
+      nodes.push({ id: "forest", defId: "def:forest", kind: "forest", label: "Forest", rect: full, instance: {} });
+      const sim = game.run.sim;
+      const cam = game.run.cam;
+      if (sim && game.canvas) {
+        const c = game.canvas.getBoundingClientRect();
+        const toRect = (x0, y0, x1, y1) => ({
+          x: c.left + c.width / 2 + (x0 - cam.x) * cam.ppm,
+          y: c.top + c.height / 2 - (y1 - cam.y) * cam.ppm,
+          w: (x1 - x0) * cam.ppm,
+          h: (y1 - y0) * cam.ppm,
+        });
+        nodes.push({ id: "terrain", defId: "def:terrain", kind: "terrain", label: "Forest trail", rect: { x: c.left, y: c.top + c.height / 2, w: c.width, h: c.height / 2 }, instance: { section: game.state.section } });
+        const halfW = c.width / 2 / cam.ppm;
+        for (const p of sim.track.props) {
+          if (Math.abs(p.x - cam.x) > halfW + 3) continue;
+          const hw = p.type === "log" ? p.len / 2 : p.rx;
+          const hh = p.type === "log" ? p.r : p.ry;
+          nodes.push({ id: p.id, defId: "def:trail-props", kind: "prop", label: p.type, rect: toRect(p.x - hw, p.y - hh, p.x + hw, p.y + hh), instance: { type: p.type, x: p.x } });
+        }
+        const bp = sim.bike.chassis.getPosition();
+        nodes.push({ id: "bike", defId: "def:bike", kind: "bike", label: "Dirt bike", rect: toRect(bp.x - 1.1, bp.y - 0.5, bp.x + 1.1, bp.y + 0.9), instance: { speedKmh: Math.round(game.state.speedKmh), rpm: Math.round(sim.bike.rpm), gear: sim.bike.gear } });
+        let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+        for (const b of sim.rider.list) {
+          const p = b.getPosition();
+          x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y); x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y);
+        }
+        nodes.push({ id: "rider", defId: "def:rider", kind: "rider", label: "Rider", rect: toRect(x0 - 0.2, y0 - 0.2, x1 + 0.2, y1 + 0.2), instance: { state: sim.rider.mode, grips: sim.rider.grips.filter((g) => g.joint).length } });
+        if (sim.particles.length) nodes.push({ id: "dust", defId: "def:dust", kind: "dust", label: "Dust", rect: toRect(bp.x - 3, bp.y - 1, bp.x + 1, bp.y + 1.5), instance: { particles: sim.particles.length } });
+        nodes.push({ id: "camera", defId: "def:camera", kind: "camera", label: "Camera", rect: { x: c.left, y: c.top, w: c.width, h: c.height }, instance: { metresAcross: Math.round(c.width / cam.ppm) } });
+      }
+      const hud = [
+        [".hud-speed", "hud-speed", "Speed and place"],
+        [".hud-records", "hud-records", "Personal records"],
+        [".legend", "hud-legend", "Key legend"],
+        [".prompt:not([hidden])", "hud-prompt", "Pick-up prompt"],
+      ];
+      for (const [sel, kind, label] of hud) {
+        const el = mount.querySelector(sel);
+        if (el) nodes.push({ id: kind, defId: "def:hud", kind, label, rect: rectOf(el), instance: {} });
+      }
+      return { nodes };
+    },
+
+    getState: () => ({
+      speedKmh: Math.round(game.state.speedKmh),
+      distance: Math.round(game.state.distance),
+      section: game.state.section,
+      sectionIndex: SECTIONS.findIndex((s) => s.name === game.state.section),
+      rider: game.state.riderState,
+      bestJump: Math.round(game.state.bestJump * 10) / 10,
+      bestAir: Math.round(game.state.bestAir * 10) / 10,
+      bestWreck: Math.round(game.state.bestWreck),
+      loading: game.state.loading,
+    }),
+
+    commands: {
+      "pick-up-bike": {
+        label: "Pick up the bike",
+        icon: "Bike",
+        description: "Stand the bike up where it lies and put the rider back on (after a crash)",
+        mutates: true,
+        run: () => game.pickUpBike(),
+      },
+      "bail-off": {
+        label: "Bail off",
+        icon: "PersonStanding",
+        description: "The rider lets go and pushes off the bike",
+        mutates: true,
+        run: () => game.bailOff(),
+      },
+      "ride-from-clearing": {
+        label: "Start at The Clearing",
+        icon: "Mountain",
+        description: "Put the bike at the start of the big jumps",
+        mutates: true,
+        run: () => game.rideFromSection(2),
+      },
+      "ride-from-gap": {
+        label: "Start at The Gap",
+        icon: "MoveHorizontal",
+        description: "Put the bike at the run-in to the ravine gap",
+        mutates: true,
+        run: () => game.rideFromSection(6),
+      },
+      "ride-from-start": {
+        label: "Back to the trailhead",
+        icon: "RotateCcw",
+        description: "Put the bike and rider back at Pine Gate",
+        mutates: true,
+        run: () => game.rideFromStart(),
+      },
+    },
+  };
+}
+// Spine of the game: builds the trail and its forest once, loads the art,
+// runs the physics sandbox inside the SDK loop, and turns what the physics
+// reports (landings, wrecks, impacts) into sound, call-outs and records.
+import { loadArt } from "./assets.js";
+import { createAudio } from "./audio.js";
+import { createCamera, snapCamera, updateCamera } from "./camera.js";
+import { createHud } from "./hud.js";
+import { createInput } from "./input.js";
+import { createRecords } from "./records.js";
+import { createRenderer } from "./render.js";
+import { buildScenery } from "./scenery.js";
+import { bail, canPickUp, createSim, pickUp, pump, setGravity, spawnAt, stepSim } from "./sim.js";
+import { buildTrack, END_ZONE_X, SECTIONS, sectionIndexAt, SPAWN_X } from "./track.js";
+
+export function createGame({ mount, sdk, ready, tweaks, assets }) {
+  // Plain summary of the run for hooks and the Creator Tools; the physics
+  // world itself lives on `run` below and is rebuilt by init.
+  const state = {
+    loading: true, error: null,
+    speedKmh: 0, distance: 0, section: SECTIONS[0].name, riderState: "riding",
+    bestJump: 0, bestAir: 0, bestWreck: 0,
+    popups: [], card: null, prompt: "", used: {}, freshRecord: null,
+    time: 0,
+  };
+
+  const root = document.createElement("div");
+  root.className = "game-root";
+  const canvas = document.createElement("canvas");
+  canvas.className = "game-canvas";
+  root.appendChild(canvas);
+  const hud = createHud(root);
+  const loading = document.createElement("div");
+  loading.className = "loading";
+  loading.innerHTML = `<div class="loading-inner"><span class="loading-dot"></span><span class="loading-text">Heading into the forest…</span></div>`;
+  root.appendChild(loading);
+  mount.replaceChildren(root);
+
+  const track = buildTrack();
+  const scenery = buildScenery();
+  const input = createInput(window);
+  const audio = createAudio(sdk);
+  const records = createRecords(sdk);
+  let renderer = null;
+
+  const run = { sim: null, cam: createCamera(SPAWN_X, 1.5), discovered: new Set(), fade: 0, fadeAction: null, popupId: 0, freshT: 0 };
+
+  const tune = () => ({
+    enginePower: tweaks.get("enginePower"),
+    grip: tweaks.get("tyreGrip"),
+    frontSpring: tweaks.get("frontSpring"),
+    rearSpring: tweaks.get("rearSpring"),
+    damping: tweaks.get("suspensionDamping"),
+    brake: tweaks.get("brakeStrength"),
+    gripStrength: tweaks.get("gripStrength"),
+    muscle: tweaks.get("muscleStrength"),
+    leanReach: tweaks.get("leanReach"),
+    gravity: tweaks.get("gravity"),
+    dust: tweaks.get("dustAmount"),
+  });
+  const applyVolume = () => audio.setVolume(Number(tweaks.get("masterVolume")), Boolean(tweaks.get("muted")));
+  applyVolume();
+  const unsubscribes = [
+    tweaks.subscribe("masterVolume", applyVolume),
+    tweaks.subscribe("muted", applyVolume),
+    tweaks.subscribe("gravity", (g) => run.sim && setGravity(run.sim, Number(g))),
+  ];
+
+  loadArt(assets)
+    .then((res) => {
+      renderer = createRenderer(canvas, res, track, scenery);
+      renderer.resize();
+      state.loading = false;
+      loading.hidden = true;
+    })
+    .catch((err) => {
+      console.error(err);
+      state.error = String(err.message || err);
+      loading.querySelector(".loading-text").textContent = "The forest didn't load. Reload to try again.";
+      loading.classList.add("failed");
+    });
+
+  const ro = new ResizeObserver(() => renderer && renderer.resize());
+  ro.observe(canvas);
+
+  // First key or click wakes the sound; the press still does its job.
+  const wake = () => audio.unlock();
+  window.addEventListener("keydown", wake, true);
+  window.addEventListener("pointerdown", wake, true);
+
+  function showCard(kicker, name) {
+    state.card = { kicker, name, t: 0, life: 3.2 };
+  }
+
+  function popup(kind, main, sub, x, y, best) {
+    state.popups.push({ id: ++run.popupId, kind, main, sub, x, y, t: 0, life: kind === "wreck" ? 2.8 : 2.4, best });
+  }
+
+  // ---- Actions the game performs on demand (Creator Tools call these too) --
+  function pickUpBike() {
+    if (!run.sim || run.fade > 0) return false;
+    if (!canPickUp(run.sim)) return false;
+    run.fadeAction = "pickup";
+    run.fade = 0.0001;
+    return true;
+  }
+  function rideFromStart() {
+    if (!run.sim || run.fade > 0) return false;
+    run.fadeAction = "start";
+    run.fade = 0.0001;
+    return true;
+  }
+  // Drop the bike at the start of a trail section (Creator Tools shortcut).
+  function rideFromSection(index) {
+    const sec = SECTIONS[Math.max(0, Math.min(SECTIONS.length - 1, index | 0))];
+    if (!run.sim) return false;
+    spawnAt(run.sim, Math.max(SPAWN_X, sec.x0 + 6));
+    snapCamera(run.cam, run.sim);
+    run.discovered.add(sec.id);
+    return true;
+  }
+  function bailOff() {
+    return run.sim ? bail(run.sim) : false;
+  }
+  function pumpBody() {
+    if (run.sim) pump(run.sim);
+  }
+
+  function atTrailEnd() {
+    const s = run.sim;
+    return s.rider.mode === "riding" && s.bike.chassis.getPosition().x > END_ZONE_X && s.bike.chassis.getLinearVelocity().length() < 4;
+  }
+
+  function handleEvents(sim) {
+    for (const e of sim.events) {
+      if (e.type === "impact") {
+        const w = Math.min(1, e.impulse / 260);
+        if (e.kind === "body") {
+          audio.thud(w);
+          run.cam.shake = Math.max(run.cam.shake, w * 1.2);
+        } else if (e.kind === "bike") {
+          audio.clank(Math.min(1, e.impulse / 350));
+          run.cam.shake = Math.max(run.cam.shake, w);
+        } else if (e.kind === "wheel" && e.impulse > 120) {
+          audio.thud(Math.min(1, e.impulse / 600) * 0.7, 0.8);
+          run.cam.shake = Math.max(run.cam.shake, Math.min(0.8, e.impulse / 900));
+        }
+      } else if (e.type === "jump") {
+        if (e.air < 0.6) continue;
+        const beat = records.jump(e.dist, e.air);
+        const best = beat.dist || beat.air;
+        popup("jump", `${e.dist.toFixed(1)} m`, best ? (beat.dist ? "New best jump" : "Most air yet") : `${e.air.toFixed(1)} s air`, e.x, e.y + 1.6, best);
+        if (best) {
+          audio.chime();
+          state.freshRecord = beat.dist ? "jump" : "air";
+          run.freshT = 2.5;
+        }
+      } else if (e.type === "wreck") {
+        if (e.g < 1) continue;
+        const best = records.wreck(e.g);
+        const label = e.cause === "bail" ? "Bailed" : e.g > 25 ? "Big wreck" : e.g > 10 ? "Wreck" : "Tip-over";
+        popup("wreck", `${Math.round(e.g)} g`, best ? "Hardest wreck yet" : label, e.x, e.y + 1.4, best);
+        if (best) {
+          state.freshRecord = "wreck";
+          run.freshT = 2.5;
+        }
+      } else if (e.type === "crash") {
+        run.cam.shake = Math.max(run.cam.shake, Math.min(1.4, e.speed / 12));
+      }
+    }
+    sim.events.length = 0;
+  }
+
+  const hooks = {
+    // Build or reset the run: fresh physics world, bike and rider at the trailhead.
+    init(s) {
+      const sim = createSim(track, tune());
+      run.sim = sim;
+      sim.events.length = 0;
+      snapCamera(run.cam, sim);
+      run.discovered = new Set([SECTIONS[0].id]);
+      run.fade = 0;
+      run.fadeAction = null;
+      input.clear();
+      s.popups = [];
+      s.card = null;
+      s.prompt = "";
+      s.time = 0;
+      s.riderState = "riding";
+      showCard("Golden hour", SECTIONS[0].name);
+    },
+
+    update(s, dt) {
+      const sim = run.sim;
+      if (!sim || s.loading) return;
+      s.time += dt;
+      input.tick(dt);
+      sim.tune = tune();
+
+      // Queued presses.
+      const q = input.queued;
+      if (q.pickUp) {
+        if (atTrailEnd()) rideFromStart();
+        else pickUpBike();
+      }
+      if (q.bail) bailOff();
+      if (q.pump) pumpBody();
+      q.pickUp = q.bail = q.pump = false;
+
+      // Fade to black and back for picking the bike up.
+      if (run.fade > 0) {
+        const before = run.fade;
+        run.fade += dt / 0.28;
+        if (before < 1 && run.fade >= 1) {
+          if (run.fadeAction === "pickup") pickUp(sim);
+          else if (run.fadeAction === "start") spawnAt(sim, SPAWN_X);
+          snapCamera(run.cam, sim);
+        }
+        if (run.fade >= 2) run.fade = 0;
+      }
+
+      stepSim(sim, dt, input);
+      handleEvents(sim);
+      updateCamera(run.cam, sim, dt, renderer ? renderer.size() : { W: 0, H: 0 }, {
+        viewWidth: tweaks.get("viewWidth"),
+        lookAhead: tweaks.get("lookAhead"),
+      });
+
+      const bike = sim.bike;
+      const bp = bike.chassis.getPosition();
+      const speed = bike.chassis.getLinearVelocity().length();
+      s.speedKmh = speed * 3.6;
+      s.distance = bp.x - SPAWN_X;
+      const si = sectionIndexAt(bp.x);
+      s.section = SECTIONS[si].name;
+      if (!run.discovered.has(SECTIONS[si].id) && sim.rider.mode === "riding") {
+        run.discovered.add(SECTIONS[si].id);
+        showCard(`${Math.round(Math.max(0, s.distance))} m`, SECTIONS[si].name);
+      }
+      if (sim.rider.mode === "riding") records.farthest(bp.x);
+      s.riderState = sim.rider.mode;
+      s.bestJump = records.rec.bestJump;
+      s.bestAir = records.rec.bestAir;
+      s.bestWreck = records.rec.bestWreck;
+      s.used = { ...input.used };
+      s.prompt = run.fade > 0 ? "" : canPickUp(sim) ? "Pick up the bike" : atTrailEnd() ? "Ride again from Pine Gate" : "";
+
+      if (s.card) s.card.t += dt;
+      for (const p of s.popups) p.t += dt;
+      s.popups = s.popups.filter((p) => p.t < p.life);
+      run.freshT -= dt;
+      if (run.freshT <= 0) s.freshRecord = null;
+
+      // Sound follows the machine.
+      const crashT = sim.crash ? sim.crash.t : 0;
+      let slip = 0;
+      if (bike.rearContacts > 0) slip = Math.abs(bike.rearWheel.getAngularVelocity() * 0.345 + bike.speedAlong);
+      audio.update(dt, {
+        rpm: bike.rpm, throttle: sim.rider.mode === "riding" ? bike.throttle : 0,
+        engineOn: !(sim.crash && crashT > 1.4), speed, slip,
+        rolling: bike.rearContacts + bike.frontContacts > 0 ? speed : 0,
+        time: s.time,
+      });
+    },
+
+    render(s) {
+      if (!renderer || !run.sim) return;
+      const cam = run.cam;
+      const view = {
+        sim: run.sim,
+        cam: { x: cam.x + cam.ox, y: cam.y + cam.oy, ppm: cam.ppm },
+        time: s.time,
+        warmth: Number(tweaks.get("sunWarmth")),
+        debug: Boolean(tweaks.get("showPhysics")),
+        fade: run.fade > 0 ? 1 - Math.abs(1 - run.fade) : 0,
+      };
+      renderer.draw(view);
+      const { W, H } = renderer.size();
+      hud.render(s, (x, y) => ({ x: W / 2 + (x - view.cam.x) * view.cam.ppm, y: H / 2 - (y - view.cam.y) * view.cam.ppm }));
+    },
+  };
+
+  return {
+    state,
+    hooks,
+    run,
+    pickUpBike,
+    rideFromStart,
+    rideFromSection,
+    bailOff,
+    pumpBody,
+    canvas,
+    hud,
+    destroy() {
+      for (const u of unsubscribes) u();
+      ro.disconnect();
+      input.destroy();
+      audio.destroy();
+      window.removeEventListener("keydown", wake, true);
+      window.removeEventListener("pointerdown", wake, true);
+      mount.replaceChildren();
+    },
+    sdk,
+    ready,
+    tweaks,
+    assets,
+  };
+}
+// DOM HUD over the canvas: speed and place top-left, records top-right,
+// landing call-outs next to the bike, the section card, a key legend that
+// fades key by key once used, and the pick-up prompt.
+const ICON = {
+  jump: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 18c4-9 14-9 18 0"/><path d="M17 9l4 0 0 4" /></svg>',
+  air: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="13" r="7"/><path d="M12 13V9.5M10 3h4"/></svg>',
+  wreck: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l1.8 5.2L19 6l-2.6 4.8L21 13l-5.2 1.2L17 20l-5-3-5 3 1.2-5.8L3 13l4.6-2.2L5 6l5.2 2.2z"/></svg>',
+};
+
+const KEYS = [
+  { id: "throttle", keys: ["W", "↑"], label: "Throttle" },
+  { id: "brake", keys: ["S", "↓"], label: "Brake · reverse" },
+  { id: "back", keys: ["A", "←"], label: "Lean back" },
+  { id: "fwd", keys: ["D", "→"], label: "Lean forward" },
+  { id: "space", keys: ["Space"], label: "Tap pump · hold bail" },
+];
+
+export function createHud(root) {
+  const el = document.createElement("div");
+  el.className = "safe-area hud";
+  el.innerHTML = `
+    <div class="hud-top">
+      <div class="hud-panel hud-speed">
+        <div class="speed-row"><span class="speed-value">0</span><span class="speed-unit">km/h</span></div>
+        <div class="place-row"><span class="place-name">Pine Gate</span><span class="place-dist">0 m</span></div>
+      </div>
+      <div class="hud-panel hud-records">
+        <div class="rec" data-rec="jump"><span class="rec-icon">${ICON.jump}</span><span class="rec-val">–</span></div>
+        <div class="rec" data-rec="air"><span class="rec-icon">${ICON.air}</span><span class="rec-val">–</span></div>
+        <div class="rec" data-rec="wreck"><span class="rec-icon">${ICON.wreck}</span><span class="rec-val">–</span></div>
+      </div>
+    </div>
+    <div class="section-card"><span class="section-kicker"></span><span class="section-name"></span></div>
+    <div class="popups"></div>
+    <div class="legend">${KEYS.map((k) => `<div class="legend-item" data-key="${k.id}">${k.keys.map((c) => `<kbd>${c}</kbd>`).join("")}<span>${k.label}</span></div>`).join("")}</div>
+    <div class="prompt" hidden><kbd>R</kbd><span class="prompt-text">Pick up the bike</span></div>
+  `;
+  root.appendChild(el);
+
+  const q = (s) => el.querySelector(s);
+  const speedValue = q(".speed-value");
+  const placeName = q(".place-name");
+  const placeDist = q(".place-dist");
+  const recVals = {
+    jump: q('[data-rec="jump"] .rec-val'),
+    air: q('[data-rec="air"] .rec-val'),
+    wreck: q('[data-rec="wreck"] .rec-val'),
+  };
+  const card = q(".section-card");
+  const cardKicker = q(".section-kicker");
+  const cardName = q(".section-name");
+  const popupsEl = q(".popups");
+  const prompt = q(".prompt");
+  const promptText = q(".prompt-text");
+  const legendItems = [...el.querySelectorAll(".legend-item")];
+  const popupNodes = new Map();
+  const last = {};
+
+  const setText = (node, key, text) => {
+    if (last[key] !== text) {
+      last[key] = text;
+      node.textContent = text;
+    }
+  };
+
+  function render(s, toScreen) {
+    setText(speedValue, "speed", String(Math.round(s.speedKmh)));
+    setText(placeName, "place", s.section);
+    setText(placeDist, "dist", `${Math.max(0, Math.round(s.distance))} m`);
+    setText(recVals.jump, "rj", s.bestJump > 0 ? `${s.bestJump.toFixed(1)} m` : "–");
+    setText(recVals.air, "ra", s.bestAir > 0 ? `${s.bestAir.toFixed(1)} s` : "–");
+    setText(recVals.wreck, "rw", s.bestWreck > 0 ? `${Math.round(s.bestWreck)} g` : "–");
+    for (const [k, v] of Object.entries(recVals)) v.parentElement.classList.toggle("fresh", s.freshRecord === k);
+
+    // Section card fades in, holds, fades out over its life.
+    const c = s.card;
+    const vis = c && c.t < c.life;
+    card.classList.toggle("show", !!vis);
+    if (c) {
+      setText(cardKicker, "ck", c.kicker);
+      setText(cardName, "cn", c.name);
+    }
+
+    // Landing and wreck call-outs, pinned to where they happened.
+    const seen = new Set();
+    for (const p of s.popups) {
+      seen.add(p.id);
+      let node = popupNodes.get(p.id);
+      if (!node) {
+        node = document.createElement("div");
+        node.className = `popup popup-${p.kind}`;
+        node.innerHTML = `<span class="popup-main"></span><span class="popup-sub"></span>`;
+        node.querySelector(".popup-main").textContent = p.main;
+        node.querySelector(".popup-sub").textContent = p.sub;
+        node.classList.toggle("best", !!p.best);
+        popupsEl.appendChild(node);
+        popupNodes.set(p.id, node);
+      }
+      const pt = toScreen(p.x, p.y);
+      const k = p.t / p.life;
+      node.style.left = `${pt.x}px`;
+      node.style.top = `${pt.y}px`;
+      node.style.opacity = String(k < 0.1 ? k / 0.1 : k > 0.75 ? (1 - k) / 0.25 : 1);
+      node.style.translate = `-50% calc(-100% - ${Math.round(k * 26)}px)`;
+    }
+    for (const [id, node] of popupNodes) {
+      if (!seen.has(id)) {
+        node.remove();
+        popupNodes.delete(id);
+      }
+    }
+
+    for (const item of legendItems) item.classList.toggle("used", !!s.used[item.dataset.key]);
+    prompt.hidden = !s.prompt;
+    if (s.prompt) setText(promptText, "prompt", s.prompt);
+  }
+
+  return { el, render };
+}
+// Keyboard intent. Handlers only record what is held or pressed; update()
+// reads it with the game's dt, so a frozen game ignores keys.
+const MAP = {
+  KeyW: "throttle", ArrowUp: "throttle",
+  KeyS: "brake", ArrowDown: "brake",
+  KeyA: "back", ArrowLeft: "back",
+  KeyD: "fwd", ArrowRight: "fwd",
+};
+
+export function createInput(target = window) {
+  const held = new Set();
+  const input = {
+    throttle: false, brake: false, lean: 0,
+    spaceDown: false, spaceHeld: 0, bailFired: false,
+    queued: { pump: false, bail: false, pickUp: false },
+    used: {},
+  };
+
+  const onDown = (e) => {
+    const action = MAP[e.code];
+    if (action) {
+      held.add(action);
+      input.used[action] = true;
+      e.preventDefault();
+      return;
+    }
+    if (e.code === "Space") {
+      e.preventDefault();
+      if (e.repeat || input.spaceDown) return;
+      input.spaceDown = true;
+      input.spaceHeld = 0;
+      input.bailFired = false;
+      input.used.space = true;
+    } else if (e.code === "KeyR" || e.code === "Enter") {
+      e.preventDefault();
+      if (!e.repeat) input.queued.pickUp = true;
+      input.used.pickup = true;
+    }
+  };
+  const onUp = (e) => {
+    const action = MAP[e.code];
+    if (action) held.delete(action);
+    if (e.code === "Space") {
+      if (input.spaceDown && !input.bailFired) input.queued.pump = true;
+      input.spaceDown = false;
+    }
+  };
+  const clear = () => {
+    held.clear();
+    input.spaceDown = false;
+    input.queued.pump = input.queued.bail = input.queued.pickUp = false;
+  };
+
+  target.addEventListener("keydown", onDown);
+  target.addEventListener("keyup", onUp);
+  window.addEventListener("blur", clear);
+
+  // Called from update with the game's dt: a long Space press becomes a bail.
+  input.tick = (dt) => {
+    input.throttle = held.has("throttle");
+    input.brake = held.has("brake");
+    input.lean = (held.has("fwd") ? 1 : 0) - (held.has("back") ? 1 : 0);
+    if (input.spaceDown) {
+      input.spaceHeld += dt;
+      if (input.spaceHeld > 0.4 && !input.bailFired) {
+        input.bailFired = true;
+        input.queued.bail = true;
+      }
+    }
+  };
+  input.clear = clear;
+  input.destroy = () => {
+    target.removeEventListener("keydown", onDown);
+    target.removeEventListener("keyup", onUp);
+    window.removeEventListener("blur", clear);
+  };
+  return input;
+}
+// Personal records kept between sessions; the longest clean jump also goes to
+// the leaderboard the moment it is beaten.
+const blank = () => ({ version: 1, bestJump: 0, bestAir: 0, bestWreck: 0, farthest: 0 });
+
+export function createRecords(sdk) {
+  const rec = blank();
+  let loaded = false;
+  sdk.gameState
+    .load()
+    .then((saved) => {
+      if (saved && saved.version === 1) {
+        for (const k of ["bestJump", "bestAir", "bestWreck", "farthest"]) {
+          const v = Number(saved[k]);
+          if (Number.isFinite(v) && v > rec[k]) rec[k] = v;
+        }
+      }
+      loaded = true;
+    })
+    .catch(() => {
+      loaded = true;
+    });
+
+  const save = () => {
+    void sdk.gameState.save({ ...rec }).catch(() => {});
+  };
+
+  return {
+    rec,
+    get loaded() {
+      return loaded;
+    },
+    // Returns which records the jump beat.
+    jump(dist, air) {
+      const beat = { dist: dist > rec.bestJump + 0.05, air: air > rec.bestAir + 0.01 };
+      if (beat.dist) {
+        rec.bestJump = dist;
+        const score = Math.round(dist * 10) / 10;
+        if (Number.isFinite(score) && score > 0) sdk.leaderboard.submit(Math.min(score, Number.MAX_SAFE_INTEGER)).catch(() => {});
+      }
+      if (beat.air) rec.bestAir = air;
+      if (beat.dist || beat.air) save();
+      return beat;
+    },
+    wreck(g) {
+      if (g > rec.bestWreck + 0.05) {
+        rec.bestWreck = g;
+        save();
+        return true;
+      }
+      return false;
+    },
+    farthest(x) {
+      if (x > rec.farthest + 25) {
+        rec.farthest = x;
+        save();
+      }
+    },
+  };
+}
+// Canvas renderer. Back to front: sunset sky, hazy hills, the treeline, three
+// depths of forest, trail-side trees and plants, the dirt cross-section with
+// ruts and fresh tyre marks, rocks and logs, the bike and rider drawn from
+// their physics bodies, dust, foreground ferns, then the warm light grade.
+// Reads simulation state; never changes it.
+import { GEOM, BIKE_SPRITE } from "./bike.js";
+import { hash1 } from "./rng.js";
+import { shadeAt } from "./scenery.js";
+import { heightAt, SECTIONS, smoothHeightAt, STEP, TRACK_END, TRACK_START } from "./track.js";
+
+// Sprite anchors measured on the generated sheets (sheet pixels) and the
+// metres one sheet pixel covers when drawn on the simulated body.
+const RIDER_SPRITES = {
+  torso: { anchor: [590, 210], m: 0.00178 },
+  head: { anchor: [195, 222], m: 0.00118 },
+  upper_arm: { anchor: [964, 220], m: 0.00104 },
+  forearm: { anchor: [1321, 216], m: 0.00088 },
+  glove: { anchor: [196, 592], m: 0.00072, rot: Math.PI },
+  thigh: { anchor: [588, 600], m: 0.00146 },
+  shin: { anchor: [977, 598], m: 0.00143 },
+  boot: { anchor: [1320, 640], m: 0.00128 },
+};
+const WHEEL = { center: [242, 248], m: (GEOM.wheelR * 2) / 438 };
+const SWING = { pivot: [540, 255], axle: [1000, 293] };
+const FORK = { axle: [1172, 428], m: 0.62 / 398 };
+
+function densityAt(x) {
+  for (const s of SECTIONS) if (x >= s.x0 && x < s.x1) return s.trees;
+  return 0.5;
+}
+function smoothDensity(x) {
+  let s = 0;
+  for (let i = -4; i <= 4; i++) s += densityAt(x + i * 12);
+  return s / 9;
+}
+
+export function createRenderer(canvas, { art, frame }, track, scenery) {
+  const ctx = canvas.getContext("2d");
+  const layer = document.createElement("canvas");
+  const lctx = layer.getContext("2d");
+  let W = 0;
+  let H = 0;
+  let dpr = 1;
+  let dirtPattern = null;
+
+  // Soft dust puff, drawn many times with varying alpha and size.
+  const puff = document.createElement("canvas");
+  puff.width = puff.height = 64;
+  {
+    const p = puff.getContext("2d");
+    const g = p.createRadialGradient(32, 32, 0, 32, 32, 32);
+    g.addColorStop(0, "rgba(168,118,76,0.85)");
+    g.addColorStop(0.5, "rgba(150,104,66,0.42)");
+    g.addColorStop(1, "rgba(140,96,60,0)");
+    p.fillStyle = g;
+    p.fillRect(0, 0, 64, 64);
+  }
+
+  function resize() {
+    const rect = canvas.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width = Math.round(rect.width * dpr);
+    canvas.height = Math.round(rect.height * dpr);
+    layer.width = canvas.width;
+    layer.height = canvas.height;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    lctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    W = rect.width;
+    H = rect.height;
+    dirtPattern = ctx.createPattern(art.DIRT_TEXTURE, "repeat");
+  }
+
+  const size = () => ({ W, H });
+
+  function draw(view) {
+    if (!W || !H) return;
+    const { sim, cam, warmth, debug } = view;
+    const ppm = cam.ppm;
+    const sx = (x) => W / 2 + (x - cam.x) * ppm;
+    const sy = (y) => H / 2 - (y - cam.y) * ppm;
+    const density = smoothDensity(cam.x);
+
+    // ---- Sky -------------------------------------------------------------
+    const sky = art.SKY_BACKDROP;
+    const horizonY = H * 0.6 + (cam.y - smoothHeightAt(track, cam.x)) * ppm * 0.04;
+    // One wide plate that drifts a few hundred pixels over the whole trail: no seam ever shows.
+    const drift = 0.1;
+    const skyScale = Math.max((W + (TRACK_END - TRACK_START) * drift + 40) / sky.width, horizonY / (sky.height * 0.81));
+    const skyW = sky.width * skyScale;
+    const skyTop = horizonY - sky.height * 0.81 * skyScale;
+    const skyOff = -Math.min(skyW - W, Math.max(0, (cam.x - TRACK_START) * drift));
+    ctx.drawImage(sky, skyOff, skyTop, skyW, sky.height * skyScale);
+    const sunX = skyOff + 0.27 * skyW;
+    const sunY = horizonY - sky.height * (0.81 - 0.818) * skyScale;
+
+    // ---- Distant hills ---------------------------------------------------
+    const hills = art.FOREST_HILLS;
+    const hillsH = H * 0.36;
+    const hs = hillsH / hills.height;
+    const hillsW = hills.width * hs;
+    const hillsTop = horizonY - H * 0.1 + (cam.y - smoothHeightAt(track, cam.x)) * ppm * 0.06;
+    const hOff = -(((cam.x * ppm * 0.06) % hillsW) + hillsW) % hillsW;
+    ctx.globalAlpha = 0.92;
+    for (let x = hOff - hillsW; x < W; x += hillsW) ctx.drawImage(hills, x, hillsTop, hillsW + 1, hillsH);
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = "#6a3c1a";
+    ctx.fillRect(0, hillsTop + hillsH - 2, W, H);
+    hazeBand(hillsTop - H * 0.05, H * 0.5, "rgba(236,150,80,0.38)");
+
+    // ---- Treeline (lower where the forest opens up) ----------------------
+    const tl = art.TREELINE_MID;
+    const tlP = 0.26;
+    const tlH = 30 * ppm * tlP * (0.28 + 0.78 * density);
+    const tlS = tlH / tl.height;
+    const tlW = tl.width * tlS;
+    const tlBase = H / 2 - ((smoothHeightAt(track, cam.x) - cam.y) * tlP + (1 - tlP) * 2.2 - (1 - density) * 3.2) * ppm;
+    const tOff = -(((cam.x * ppm * tlP) % tlW) + tlW) % tlW;
+    for (let x = tOff - tlW; x < W; x += tlW) ctx.drawImage(tl, x, tlBase - tlH, tlW + 1, tlH);
+    ctx.fillStyle = "#2c2210";
+    ctx.fillRect(0, tlBase - 2, W, H);
+    hazeBand(tlBase - tlH * 0.9, tlH * 1.2, "rgba(232,140,70,0.26)");
+
+    // ---- Forest bands ----------------------------------------------------
+    for (let b = 0; b < 3; b++) drawBand(scenery.bands[b], view);
+    lightShafts(view, density);
+
+    // ---- Trail-side trees and edge plants (behind the dirt line) ----------
+    drawBand(scenery.bands[3], view);
+    drawEdgePlants(view);
+
+    // ---- Terrain ---------------------------------------------------------
+    drawTerrain(view);
+    drawProps(view);
+    drawShadows(view);
+
+    // ---- Bike and rider --------------------------------------------------
+    lctx.clearRect(0, 0, W, H);
+    drawActors(lctx, view);
+    const shade = shadeAt(scenery, sim.bike.chassis.getPosition().x);
+    lctx.save();
+    lctx.globalCompositeOperation = "source-atop";
+    lctx.fillStyle = `rgba(22,10,4,${0.42 * shade})`;
+    lctx.fillRect(0, 0, W, H);
+    lctx.fillStyle = `rgba(255,150,60,${0.1 * (1 - shade) * warmth})`;
+    lctx.fillRect(0, 0, W, H);
+    lctx.restore();
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.drawImage(layer, 0, 0);
+    ctx.restore();
+
+    drawParticles(view);
+    drawForeground(view);
+
+    // ---- Light grade -----------------------------------------------------
+    ctx.save();
+    ctx.globalCompositeOperation = "soft-light";
+    ctx.fillStyle = `rgba(255,150,70,${0.45 * warmth})`;
+    ctx.fillRect(0, 0, W, H);
+    ctx.globalCompositeOperation = "lighter";
+    const flare = ctx.createRadialGradient(sunX, sunY, 0, sunX, sunY, W * 0.55);
+    flare.addColorStop(0, `rgba(255,200,120,${0.32 * warmth})`);
+    flare.addColorStop(0.35, `rgba(255,140,60,${0.1 * warmth})`);
+    flare.addColorStop(1, "rgba(255,120,40,0)");
+    ctx.fillStyle = flare;
+    ctx.fillRect(0, 0, W, H);
+    ctx.globalCompositeOperation = "source-over";
+    const vig = ctx.createRadialGradient(W / 2, H * 0.48, Math.min(W, H) * 0.35, W / 2, H * 0.5, Math.max(W, H) * 0.78);
+    vig.addColorStop(0, "rgba(28,12,4,0)");
+    vig.addColorStop(1, "rgba(28,12,4,0.5)");
+    ctx.fillStyle = vig;
+    ctx.fillRect(0, 0, W, H);
+    ctx.restore();
+
+    if (debug) drawDebug(view);
+    if (view.fade > 0) {
+      ctx.fillStyle = `rgba(20,10,4,${view.fade})`;
+      ctx.fillRect(0, 0, W, H);
+    }
+
+    function hazeBand(top, height, color) {
+      const g = ctx.createLinearGradient(0, top, 0, top + height);
+      g.addColorStop(0, "rgba(0,0,0,0)");
+      g.addColorStop(0.55, color);
+      g.addColorStop(1, "rgba(0,0,0,0)");
+      ctx.fillStyle = g;
+      ctx.fillRect(0, top, W, height);
+    }
+
+    function bandBase(p, bx) {
+      const wx = bx / p;
+      return H / 2 - ((smoothHeightAt(track, wx) - cam.y) * p + (1 - p) * 2.2) * ppm;
+    }
+
+    function drawBand(band, v) {
+      const p = band.p;
+      const left = cam.x * p - W / 2 / ppm - 12;
+      const right = cam.x * p + W / 2 / ppm + 12;
+      // Trees, then the forest floor in front of their trunks.
+      for (const t of band.trees) {
+        if (t.bx < left || t.bx > right) continue;
+        const img = band.haze >= 0 ? art.haze[t.type][band.haze] : art[t.type];
+        const hpx = t.h * ppm * p;
+        const wpx = (img.width / img.height) * hpx;
+        const x = W / 2 + (t.bx - cam.x * p) * ppm;
+        const y = band.id === "trail" ? sy(heightAt(track, t.bx)) + 0.6 * ppm : bandBase(p, t.bx) + 0.5 * ppm * p;
+        const sway = Math.sin(v.time * 0.6 + t.sway) * 0.012;
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.transform(1, 0, sway, 1, 0, 0);
+        if (t.flip) ctx.scale(-1, 1);
+        ctx.drawImage(img, -wpx / 2, -hpx, wpx, hpx);
+        ctx.restore();
+      }
+      if (band.id === "trail") return;
+      const tones = [["#8a5428", "#5e3818"], ["#6a4220", "#3a2410"], ["#4a3218", "#22160a"]][band.haze];
+      const top = bandBase(p, cam.x * p);
+      const grad = ctx.createLinearGradient(0, top - 1.5 * ppm * p, 0, top + 6 * ppm * p);
+      grad.addColorStop(0, tones[0]);
+      grad.addColorStop(1, tones[1]);
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.moveTo(-10, H + 10);
+      for (let x = -10; x <= W + 30; x += 24) {
+        const bx = cam.x * p + (x - W / 2) / ppm;
+        ctx.lineTo(x, bandBase(p, bx) + Math.sin(bx * 1.7 + band.p * 9) * 0.15 * ppm * p);
+      }
+      ctx.lineTo(W + 30, H + 10);
+      ctx.closePath();
+      ctx.fill();
+      // Undergrowth along the floor line.
+      const img = band.haze === 2 ? art.propsShade : art.propsBack;
+      const step = 1.5;
+      const first = Math.floor(left / step) * step;
+      for (let bx = first; bx < right; bx += step) {
+        const k = Math.floor(bx / step);
+        const kind = ["bush", "fern", "bush", "grass_tuft", "weeds", "fern"][Math.floor(hash1(k, band.haze + 3) * 6)];
+        const f = frame.TRAIL_PROPS[kind];
+        const hpx = (0.7 + hash1(k, 7) * 1.1) * ppm * p;
+        const s = hpx / f.content.h;
+        const x = W / 2 + (bx - cam.x * p) * ppm;
+        const y = bandBase(p, bx) + 0.2 * ppm * p;
+        ctx.globalAlpha = band.haze === 0 ? 0.55 : 0.9;
+        ctx.drawImage(img, f.content.x, f.content.y, f.content.w, f.content.h, x - (f.content.w * s) / 2, y - hpx, f.content.w * s, hpx);
+      }
+      ctx.globalAlpha = 1;
+      const hz = band.haze === 0 ? 0.3 : band.haze === 1 ? 0.18 : 0.08;
+      hazeBand(bandBase(p, cam.x * p) - 18 * ppm * p, 22 * ppm * p, `rgba(230,140,70,${hz})`);
+    }
+
+    function lightShafts(v, dens) {
+      ctx.save();
+      ctx.globalCompositeOperation = "lighter";
+      const strength = (0.35 + dens * 0.65) * v.warmth;
+      for (let i = 0; i < 6; i++) {
+        const span = W * 1.8;
+        const x = ((((i * 0.37 + 0.11) * span - cam.x * ppm * 0.55) % span) + span) % span - W * 0.4;
+        const w0 = W * (0.015 + hash1(i, 2) * 0.03);
+        const w1 = w0 * 3.2;
+        const dx = H * 0.75;
+        const g = ctx.createLinearGradient(x, 0, x + dx, H);
+        const a = (0.05 + hash1(i, 5) * 0.06) * strength * (0.75 + 0.25 * Math.sin(v.time * 0.3 + i));
+        g.addColorStop(0, `rgba(255,196,120,${a})`);
+        g.addColorStop(0.7, `rgba(255,160,80,${a * 0.4})`);
+        g.addColorStop(1, "rgba(255,150,70,0)");
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.moveTo(x, -10);
+        ctx.lineTo(x + w0, -10);
+        ctx.lineTo(x + dx + w1, H);
+        ctx.lineTo(x + dx, H);
+        ctx.closePath();
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+
+    function drawEdgePlants(v) {
+      const left = cam.x - W / 2 / ppm - 2;
+      const right = cam.x + W / 2 / ppm + 2;
+      for (const pl of scenery.edge) {
+        if (pl.x < left || pl.x > right) continue;
+        const f = frame.TRAIL_PROPS[pl.kind];
+        const img = pl.back ? art.propsBack : art.TRAIL_PROPS;
+        const hpx = pl.h * ppm;
+        const s = hpx / f.content.h;
+        const wpx = f.content.w * s;
+        const baseY = sy(heightAt(track, pl.x)) + 0.1 * ppm;
+        const sway = pl.kind === "stump" || pl.kind === "branch" ? 0 : Math.sin(v.time * 1.4 + pl.sway) * 0.08;
+        ctx.save();
+        ctx.translate(sx(pl.x), baseY);
+        ctx.transform(1, 0, sway, 1, 0, 0);
+        if (pl.flip) ctx.scale(-1, 1);
+        ctx.drawImage(img, f.content.x, f.content.y, f.content.w, f.content.h, -wpx / 2, -hpx, wpx, hpx);
+        ctx.restore();
+      }
+    }
+
+    function drawTerrain(v) {
+      const x0 = cam.x - W / 2 / ppm - 1;
+      const x1 = cam.x + W / 2 / ppm + 1;
+      const i0 = Math.max(0, Math.floor((x0 - TRACK_START) / STEP));
+      const i1 = Math.min(track.n - 1, Math.ceil((x1 - TRACK_START) / STEP));
+      const pts = [];
+      for (let i = i0; i <= i1; i++) pts.push([sx(track.xs[i]), sy(track.heights[i]), i]);
+      const path = new Path2D();
+      path.moveTo(pts[0][0], pts[0][1]);
+      for (const p of pts) path.lineTo(p[0], p[1]);
+      path.lineTo(pts[pts.length - 1][0], H + 20);
+      path.lineTo(pts[0][0], H + 20);
+      path.closePath();
+
+      const scale = (3.4 * ppm) / art.DIRT_TEXTURE.width;
+      if (dirtPattern && dirtPattern.setTransform) {
+        dirtPattern.setTransform(new DOMMatrix().translate(W / 2 - cam.x * ppm, H / 2 + cam.y * ppm).scale(scale));
+      }
+      ctx.fillStyle = dirtPattern || "#4a2c16";
+      ctx.fill(path);
+
+      ctx.save();
+      ctx.clip(path);
+      const surf = sy(heightAt(track, cam.x));
+      const deep = ctx.createLinearGradient(0, surf - ppm, 0, surf + 5 * ppm);
+      deep.addColorStop(0, "rgba(40,20,8,0)");
+      deep.addColorStop(1, "rgba(24,12,4,0.62)");
+      ctx.fillStyle = deep;
+      ctx.fill(path);
+
+      const line = (offset, width, style, dash) => {
+        ctx.beginPath();
+        for (let k = 0; k < pts.length; k++) {
+          const [x, y] = pts[k];
+          if (k === 0) ctx.moveTo(x, y + offset * ppm);
+          else ctx.lineTo(x, y + offset * ppm);
+        }
+        ctx.lineWidth = width * ppm;
+        ctx.strokeStyle = style;
+        ctx.setLineDash(dash ? dash.map((d) => d * ppm) : []);
+        ctx.stroke();
+      };
+      ctx.lineJoin = "round";
+      line(0, 1.1, "rgba(58,32,14,0.42)");
+      line(0, 0.24, "rgba(160,104,58,0.55)");
+      line(0.13, 0.05, "rgba(36,18,8,0.45)", [0.9, 0.35, 0.4, 0.25]);
+      line(0.22, 0.035, "rgba(36,18,8,0.32)", [0.5, 0.6, 1.2, 0.3]);
+      line(0.36, 0.06, "rgba(90,58,30,0.25)", [1.6, 0.8]);
+      ctx.setLineDash([]);
+
+      // Fresh tyre marks pressed into the surface.
+      ctx.lineCap = "round";
+      for (let k = 0; k < pts.length - 1; k++) {
+        const m = sim.marks[pts[k][2]];
+        if (m < 0.04) continue;
+        ctx.strokeStyle = `rgba(34,18,8,${Math.min(0.7, m * 0.75)})`;
+        ctx.lineWidth = 0.075 * ppm;
+        ctx.beginPath();
+        ctx.moveTo(pts[k][0], pts[k][1] + 0.045 * ppm);
+        ctx.lineTo(pts[k + 1][0], pts[k + 1][1] + 0.045 * ppm);
+        ctx.stroke();
+        if ((pts[k][2] & 1) === 0) {
+          ctx.fillStyle = `rgba(24,12,6,${Math.min(0.6, m * 0.6)})`;
+          ctx.fillRect(pts[k][0], pts[k][1] + 0.02 * ppm, 0.06 * ppm, 0.05 * ppm);
+        }
+      }
+
+      // Pebbles and leaf litter in the top of the cut face.
+      for (const [x, y, i] of pts) {
+        const h1 = hash1(i, 31);
+        if (h1 < 0.22) {
+          const depth = 0.08 + hash1(i, 32) * 0.5;
+          const r = (0.02 + hash1(i, 33) * 0.035) * ppm;
+          const tone = 70 + Math.floor(hash1(i, 34) * 60);
+          ctx.fillStyle = `rgb(${tone + 30},${tone + 14},${tone})`;
+          ctx.beginPath();
+          ctx.ellipse(x + hash1(i, 35) * STEP * ppm, y + depth * ppm, r * 1.3, r, 0, 0, Math.PI * 2);
+          ctx.fill();
+        } else if (h1 > 0.9) {
+          ctx.fillStyle = hash1(i, 36) < 0.5 ? "rgba(176,92,30,0.85)" : "rgba(120,74,26,0.85)";
+          ctx.fillRect(x, y - 0.01 * ppm, 0.07 * ppm, 0.025 * ppm);
+        }
+      }
+
+      // Patches of shade from the trees, sunlit dirt in between.
+      for (let k = 0; k < pts.length - 1; k++) {
+        const wx = track.xs[pts[k][2]];
+        const s = shadeAt(scenery, wx);
+        const [ax, ay] = pts[k];
+        const [bx, by] = pts[k + 1];
+        if (s > 0.02) {
+          ctx.fillStyle = `rgba(20,9,3,${s * 0.5})`;
+          ctx.beginPath();
+          ctx.moveTo(ax, ay - 2);
+          ctx.lineTo(bx + 0.5, by - 2);
+          ctx.lineTo(bx + 0.5, by + 1.4 * ppm);
+          ctx.lineTo(ax, ay + 1.4 * ppm);
+          ctx.fill();
+        }
+      }
+      ctx.restore();
+
+      // Sun catching the lip of the dirt.
+      ctx.lineWidth = Math.max(1.5, 0.03 * ppm);
+      ctx.lineJoin = "round";
+      for (let k = 0; k < pts.length - 1; k += 1) {
+        const s = shadeAt(scenery, track.xs[pts[k][2]]);
+        const a = 0.55 * (1 - s) * v.warmth + 0.12;
+        ctx.strokeStyle = `rgba(255,186,112,${a})`;
+        ctx.beginPath();
+        ctx.moveTo(pts[k][0], pts[k][1]);
+        ctx.lineTo(pts[k + 1][0], pts[k + 1][1]);
+        ctx.stroke();
+      }
+    }
+
+    function drawProps() {
+      const left = cam.x - W / 2 / ppm - 3;
+      const right = cam.x + W / 2 / ppm + 3;
+      for (const p of track.props) {
+        if (p.x < left || p.x > right) continue;
+        if (p.type === "log") {
+          const f = frame.TRAIL_PROPS.log.content;
+          const wpx = (p.len + 0.1) * ppm;
+          const s = wpx / f.w;
+          ctx.drawImage(art.TRAIL_PROPS, f.x, f.y, f.w, f.h, sx(p.x) - wpx / 2, sy(p.y) - (f.h * s) / 2, wpx, f.h * s);
+        } else {
+          const f = frame.TRAIL_PROPS[p.type === "rock-large" ? "rock_large" : "rock_small"].content;
+          const wpx = p.rx * 2.15 * ppm;
+          const s = wpx / f.w;
+          const bottom = sy(p.y - p.ry * 0.7) + 0.04 * ppm;
+          ctx.drawImage(art.TRAIL_PROPS, f.x, f.y, f.w, f.h, sx(p.x) - wpx / 2, bottom - f.h * s, wpx, f.h * s);
+        }
+      }
+    }
+
+    function drawShadows() {
+      // Low sun on the left: shadows fall long to the right on the dirt.
+      const castShadow = (x, y, w) => {
+        const g = heightAt(track, x);
+        const hgt = Math.max(0, y - g);
+        const shx = x + 0.4 + hgt * 1.4;
+        const gy = heightAt(track, shx);
+        const a = 0.42 / (1 + hgt * 0.45);
+        const rw = (w + hgt * 0.5) * ppm;
+        ctx.fillStyle = `rgba(20,8,2,${a})`;
+        ctx.beginPath();
+        ctx.ellipse(sx(shx), sy(gy) + 0.02 * ppm, rw, 0.07 * ppm + hgt * 0.01 * ppm, 0, 0, Math.PI * 2);
+        ctx.fill();
+      };
+      const b = sim.bike.chassis.getPosition();
+      castShadow(b.x, b.y - 0.35, 1.05);
+      if (sim.rider.mode !== "riding") {
+        const t = sim.rider.bodies.torso.getPosition();
+        castShadow(t.x, t.y, 0.55);
+      }
+    }
+
+    function drawParticles() {
+      for (const p of sim.particles) {
+        const k = p.life / p.max;
+        if (p.kind === "dust") {
+          const a = Math.pow(1 - k, 1.6) * 0.26 * Math.min(1, p.life * 8);
+          const r = p.size * ppm;
+          ctx.globalAlpha = a;
+          ctx.drawImage(puff, sx(p.x) - r, sy(p.y) - r, r * 2, r * 2);
+        } else {
+          ctx.globalAlpha = 1 - k * 0.5;
+          ctx.fillStyle = p.seed < 0.5 ? "#3a2210" : "#5a3a1e";
+          const r = p.size * ppm;
+          ctx.fillRect(sx(p.x) - r, sy(p.y) - r, r * 2, r * 1.6);
+        }
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    function drawForeground(v) {
+      const p = 1.35;
+      for (const pl of scenery.fore) {
+        const x = W / 2 + (pl.bx - cam.x * p) * ppm;
+        const f = frame.TRAIL_PROPS[pl.kind];
+        const hpx = Math.min(H * 0.26, pl.h * ppm * p * 0.7);
+        const s = hpx / f.content.h;
+        const wpx = f.content.w * s;
+        if (x < -wpx || x > W + wpx) continue;
+        const sway = Math.sin(v.time * 1.1 + pl.sway) * 0.06;
+        ctx.save();
+        ctx.translate(x, H + hpx * 0.18);
+        ctx.transform(1, 0, sway, 1, 0, 0);
+        if (pl.flip) ctx.scale(-1, 1);
+        ctx.drawImage(art.propsShade, f.content.x, f.content.y, f.content.w, f.content.h, -wpx / 2, -hpx, wpx, hpx);
+        ctx.restore();
+      }
+    }
+
+    function drawDebug() {
+      ctx.save();
+      ctx.lineWidth = 1;
+      for (let b = sim.world.getBodyList(); b; b = b.getNext()) {
+        if (b.isStatic()) continue;
+        for (let f = b.getFixtureList(); f; f = f.getNext()) {
+          const s = f.getShape();
+          const ud = f.getUserData() || {};
+          ctx.strokeStyle = ud.rider ? "rgba(120,220,255,0.9)" : "rgba(255,240,120,0.9)";
+          ctx.beginPath();
+          if (s.getType() === "circle") {
+            const c = b.getWorldPoint(s.getCenter());
+            ctx.arc(sx(c.x), sy(c.y), s.getRadius() * ppm, 0, Math.PI * 2);
+            const e = b.getWorldPoint({ x: s.getRadius(), y: 0 });
+            ctx.moveTo(sx(c.x), sy(c.y));
+            ctx.lineTo(sx(e.x), sy(e.y));
+          } else if (s.getType() === "polygon") {
+            const vs = s.m_vertices;
+            vs.forEach((vv, i) => {
+              const w = b.getWorldPoint(vv);
+              if (i === 0) ctx.moveTo(sx(w.x), sy(w.y));
+              else ctx.lineTo(sx(w.x), sy(w.y));
+            });
+            ctx.closePath();
+          }
+          ctx.stroke();
+        }
+      }
+      for (let j = sim.world.getJointList(); j; j = j.getNext()) {
+        const a = j.getAnchorA();
+        ctx.fillStyle = "rgba(255,90,60,0.95)";
+        ctx.fillRect(sx(a.x) - 2, sy(a.y) - 2, 4, 4);
+      }
+      for (const g of sim.rider.grips) {
+        if (!g.joint) continue;
+        const a = g.joint.getAnchorA();
+        const lim = g.kind === "hand" ? 2500 : 6200;
+        ctx.fillStyle = `rgba(255,${Math.round(255 * (1 - Math.min(1, g.force / lim)))},60,0.9)`;
+        ctx.beginPath();
+        ctx.arc(sx(a.x), sy(a.y), 4 + 10 * Math.min(1, g.force / lim), 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+  }
+
+  // ---- Actors: drawn on their own layer so light and shade tint them ------
+  function drawActors(c, view) {
+    const { sim, cam } = view;
+    const ppm = cam.ppm;
+    const sx = (x) => W / 2 + (x - cam.x) * ppm;
+    const sy = (y) => H / 2 - (y - cam.y) * ppm;
+    const R = frame.RIDER_PARTS;
+    const B = frame.BIKE_PARTS;
+    const rb = sim.rider.bodies;
+    const bike = sim.bike;
+
+    const part = (img, f, anchor, m, body, local, extraRot = 0, flipX = false) => {
+      const p = local ? body.getWorldPoint(local) : body.getPosition();
+      const ct = f.content || f.source;
+      c.save();
+      c.translate(sx(p.x), sy(p.y));
+      c.rotate(-body.getAngle() + extraRot);
+      c.scale(m * ppm * (flipX ? -1 : 1), m * ppm);
+      c.drawImage(img, ct.x, ct.y, ct.w, ct.h, ct.x - anchor[0], ct.y - anchor[1], ct.w, ct.h);
+      c.restore();
+    };
+    const limb = (side, img) => (key, sprite) => {
+      const spec = RIDER_SPRITES[sprite];
+      part(img, R[sprite], spec.anchor, spec.m, rb[`${key}_${side}`], null, spec.rot || 0);
+    };
+
+    // Far-side limbs, in shade behind the bike.
+    const far = limb("far", art.riderFar);
+    far("ua", "upper_arm");
+    far("fa", "forearm");
+    far("hand", "glove");
+    far("thigh", "thigh");
+    far("shin", "shin");
+    far("foot", "boot");
+
+    // Wheels spin with their bodies.
+    for (const w of [bike.rearWheel, bike.frontWheel]) part(art.BIKE_PARTS, B.wheel, WHEEL.center, WHEEL.m, w, null);
+
+    // Fork lower leg slides along the fork axis with the front axle.
+    {
+      const p = bike.frontWheel.getPosition();
+      c.save();
+      c.translate(sx(p.x), sy(p.y));
+      c.rotate(-bike.chassis.getAngle() - Math.atan2(-GEOM.forkUp.x, GEOM.forkUp.y));
+      c.scale(FORK.m * ppm, FORK.m * ppm);
+      const ct = B.fork_lower.content;
+      c.drawImage(art.BIKE_PARTS, ct.x, ct.y, ct.w, ct.h, ct.x - FORK.axle[0], ct.y - FORK.axle[1], ct.w, ct.h);
+      c.restore();
+    }
+
+    // Chain from the countershaft sprocket to the rear sprocket.
+    {
+      const a = bike.chassis.getWorldPoint(GEOM.sprocket);
+      const b = bike.rearWheel.getPosition();
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const len = Math.hypot(dx, dy) || 1;
+      const nx = -dy / len;
+      const ny = dx / len;
+      c.strokeStyle = "#1b1612";
+      c.lineWidth = Math.max(1, 0.016 * ppm);
+      c.beginPath();
+      c.moveTo(sx(a.x + nx * 0.045), sy(a.y + ny * 0.045));
+      c.lineTo(sx(b.x + nx * 0.105), sy(b.y + ny * 0.105));
+      c.moveTo(sx(a.x - nx * 0.045), sy(a.y - ny * 0.045));
+      c.lineTo(sx(b.x - nx * 0.105), sy(b.y - ny * 0.105));
+      c.stroke();
+      c.fillStyle = "#2a241e";
+      c.beginPath();
+      c.arc(sx(b.x), sy(b.y), 0.11 * ppm, 0, Math.PI * 2);
+      c.fill();
+      c.fillStyle = "#8a8378";
+      c.beginPath();
+      c.arc(sx(b.x), sy(b.y), 0.035 * ppm, 0, Math.PI * 2);
+      c.fill();
+    }
+
+    // Swingarm: the sheet draws it pivot-left; on the bike it trails backwards.
+    {
+      const pv = bike.swing.getPosition();
+      const ax = bike.rearWheel.getPosition();
+      const wx = sx(ax.x) - sx(pv.x);
+      const wy = sy(ax.y) - sy(pv.y);
+      const sdx = SWING.axle[0] - SWING.pivot[0];
+      const sdy = SWING.axle[1] - SWING.pivot[1];
+      const s = Math.hypot(wx, wy) / Math.hypot(sdx, sdy);
+      const ang = Math.atan2(wy, wx) - Math.atan2(sdy, -sdx);
+      const ct = B.swingarm.content;
+      c.save();
+      c.translate(sx(pv.x), sy(pv.y));
+      c.rotate(ang);
+      c.scale(-s, s);
+      c.drawImage(art.BIKE_PARTS, ct.x, ct.y, ct.w, ct.h, ct.x - SWING.pivot[0], ct.y - SWING.pivot[1], ct.w, ct.h);
+      c.restore();
+    }
+
+    // Chassis.
+    {
+      const p = bike.chassis.getPosition();
+      const m = 1 / BIKE_SPRITE.pxPerM;
+      c.save();
+      c.translate(sx(p.x), sy(p.y));
+      c.rotate(-bike.chassis.getAngle());
+      c.scale(m * ppm, m * ppm);
+      c.drawImage(art.BIKE_BODY, -BIKE_SPRITE.ox, -BIKE_SPRITE.oy);
+      c.restore();
+    }
+
+    // Body, head, then the near-side limbs over everything.
+    part(art.RIDER_PARTS, R.torso, RIDER_SPRITES.torso.anchor, RIDER_SPRITES.torso.m, rb.torso, null);
+    part(art.RIDER_PARTS, R.helmet, RIDER_SPRITES.head.anchor, RIDER_SPRITES.head.m, rb.head, null);
+    const near = limb("near", art.RIDER_PARTS);
+    near("thigh", "thigh");
+    near("shin", "shin");
+    near("foot", "boot");
+    near("ua", "upper_arm");
+    near("fa", "forearm");
+    near("hand", "glove");
+  }
+
+  return { resize, draw, size };
+}
+// The rider: fourteen rigid body segments joined by limited hinges. Muscles
+// are joint motors with a torque budget — they pull toward a pose but yield to
+// anything stronger. The rider holds on only through four hinges (two hands on
+// the bar, two boots on the pegs) that tear free when overloaded.
+import * as planck from "planck";
+import { CAT_BIKE, CAT_GROUND, CAT_RIDER, GEOM, localToWorld } from "./bike.js";
+import { clamp, wrapAngle } from "./rng.js";
+
+// Local anchor points on each segment, metres.
+export const ANCH = {
+  torsoHip: { x: 0, y: -0.28 },
+  torsoNeck: { x: 0, y: 0.28 },
+  torsoShoulder: { x: 0.02, y: 0.21 },
+  headNeck: { x: -0.03, y: -0.14 },
+  uaTop: { x: 0, y: 0.15 },
+  uaBot: { x: 0, y: -0.15 },
+  faTop: { x: 0, y: 0.135 },
+  faBot: { x: 0, y: -0.135 },
+  handWrist: { x: 0, y: 0.04 },
+  handGrip: { x: 0, y: -0.03 },
+  thTop: { x: 0, y: 0.225 },
+  thBot: { x: 0, y: -0.225 },
+  shTop: { x: 0, y: 0.225 },
+  shBot: { x: 0, y: -0.225 },
+  footAnkle: { x: 0, y: 0 },
+  footPeg: { x: 0.07, y: -0.1 },
+};
+
+const SEGMENTS = {
+  torso: { mass: 33, hw: 0.13, hh: 0.285, cx: 0, cy: 0 },
+  head: { mass: 5.5, r: 0.13 },
+  ua: { mass: 2.2, hw: 0.045, hh: 0.16, cx: 0, cy: 0 },
+  fa: { mass: 1.4, hw: 0.04, hh: 0.145, cx: 0, cy: 0 },
+  hand: { mass: 0.5, hw: 0.04, hh: 0.05, cx: 0, cy: 0 },
+  thigh: { mass: 8.5, hw: 0.07, hh: 0.235, cx: 0, cy: 0 },
+  shin: { mass: 4, hw: 0.055, hh: 0.235, cx: 0, cy: 0 },
+  foot: { mass: 1.6, hw: 0.13, hh: 0.045, cx: 0.06, cy: -0.07 },
+};
+
+// Joint table: parent, child, anchors, limits, muscle torque budget (N·m)
+// while riding, and the friction left in the joint once the rider goes limp.
+const JOINTS = [
+  { name: "neck", a: "torso", b: "head", aa: "torsoNeck", ba: "headNeck", lo: -0.55, hi: 0.6, str: 90, limp: 7 },
+  { name: "shoulder", side: true, a: "torso", b: "ua", aa: "torsoShoulder", ba: "uaTop", lo: -1.3, hi: 3.1, str: 90, limp: 6 },
+  { name: "elbow", side: true, a: "ua", b: "fa", aa: "uaBot", ba: "faTop", lo: 0.02, hi: 2.6, str: 70, limp: 4 },
+  { name: "wrist", side: true, a: "fa", b: "hand", aa: "faBot", ba: "handWrist", lo: -0.9, hi: 0.9, str: 60, limp: 1.5 },
+  { name: "hip", side: true, a: "torso", b: "thigh", aa: "torsoHip", ba: "thTop", lo: -0.6, hi: 2.6, str: 700, limp: 14 },
+  { name: "knee", side: true, a: "thigh", b: "shin", aa: "thBot", ba: "shTop", lo: -2.7, hi: -0.02, str: 650, limp: 9 },
+  { name: "ankle", side: true, a: "shin", b: "foot", aa: "shBot", ba: "footAnkle", lo: -0.8, hi: 1.1, str: 240, limp: 4 },
+];
+
+// Curled-up bracing posture a falling rider instinctively reaches for.
+const TUCK = { neck: 0.25, shoulder: 1.3, elbow: 1.4, wrist: 0, hip: 1.6, knee: -1.7, ankle: 0.3 };
+
+const rot = (p, a) => ({ x: p.x * Math.cos(a) - p.y * Math.sin(a), y: p.x * Math.sin(a) + p.y * Math.cos(a) });
+const add = (a, b) => ({ x: a.x + b.x, y: a.y + b.y });
+const sub = (a, b) => ({ x: a.x - b.x, y: a.y - b.y });
+const dirv = (ang, len) => ({ x: Math.cos(ang) * len, y: Math.sin(ang) * len });
+const lerp = (a, b, t) => a + (b - a) * t;
+
+function ik2(root, target, a, b, sign) {
+  const dx = target.x - root.x;
+  const dy = target.y - root.y;
+  const d = Math.hypot(dx, dy);
+  const dc = clamp(d, Math.abs(a - b) + 1e-3, a + b - 1e-3);
+  const phi = Math.atan2(dy, dx);
+  const alpha = Math.acos(clamp((a * a + dc * dc - b * b) / (2 * a * dc), -1, 1));
+  const u = phi + sign * alpha;
+  const joint = add(root, dirv(u, a));
+  const v = Math.atan2(target.y - joint.y, target.x - joint.x);
+  return { u, v, joint };
+}
+
+// The riding posture in bike-local space for a given lean (-1 back … 1
+// forward) and crouch (metres the hips drop). Returns each segment's origin
+// and angle, plus the joint angles the muscles aim for.
+export function computePose(lean, crouch, reach = 1) {
+  const L = clamp(lean * reach, -1.3, 1.3);
+  const neutral = { hx: -0.3, hy: 0.7, ta: 0.62 };
+  const back = { hx: -0.43, hy: 0.6, ta: 0.4 };
+  const fwd = { hx: -0.1, hy: 0.8, ta: 0.92 };
+  const o = L < 0 ? back : fwd;
+  const t = Math.abs(L);
+  const hip = { x: lerp(neutral.hx, o.hx, t), y: lerp(neutral.hy, o.hy, t) - crouch };
+  const tT = -lerp(neutral.ta, o.ta, t);
+  const torso = sub(hip, rot(ANCH.torsoHip, tT));
+  const shoulder = add(torso, rot(ANCH.torsoShoulder, tT));
+  const neck = add(torso, rot(ANCH.torsoNeck, tT));
+  const tH = tT * 0.3;
+  const head = sub(neck, rot(ANCH.headNeck, tH));
+
+  const grip = GEOM.grip;
+  const sg = sub(shoulder, grip);
+  const sgl = Math.hypot(sg.x, sg.y) || 1;
+  const wrist = add(grip, { x: (sg.x / sgl) * 0.07, y: (sg.y / sgl) * 0.07 });
+  const arm = ik2(shoulder, wrist, 0.3, 0.27, -1);
+  const tUA = arm.u + Math.PI / 2;
+  const tFA = arm.v + Math.PI / 2;
+  const ua = add(shoulder, dirv(arm.u, 0.15));
+  const fa = add(arm.joint, dirv(arm.v, 0.135));
+  const tHand = Math.atan2(grip.y - wrist.y, grip.x - wrist.x) + Math.PI / 2;
+  const hand = sub(wrist, rot(ANCH.handWrist, tHand));
+
+  const tFoot = 0;
+  const ankle = sub(GEOM.peg, rot(ANCH.footPeg, tFoot));
+  const leg = ik2(hip, ankle, 0.45, 0.45, 1);
+  const tTh = leg.u + Math.PI / 2;
+  const tSh = leg.v + Math.PI / 2;
+  const thigh = add(hip, dirv(leg.u, 0.225));
+  const shin = add(leg.joint, dirv(leg.v, 0.225));
+
+  return {
+    seg: {
+      torso: { ...torso, a: tT }, head: { ...head, a: tH },
+      ua: { ...ua, a: tUA }, fa: { ...fa, a: tFA }, hand: { ...hand, a: tHand },
+      thigh: { ...thigh, a: tTh }, shin: { ...shin, a: tSh }, foot: { ...ankle, a: tFoot },
+    },
+    targets: {
+      neck: tH - tT, shoulder: tUA - tT, elbow: tFA - tUA, wrist: tHand - tFA,
+      hip: tTh - tT, knee: tSh - tTh, ankle: tFoot - tSh,
+    },
+  };
+}
+
+function chamferBox(s) {
+  const c = Math.min(s.hw, s.hh) * 0.45;
+  const { hw, hh, cx, cy } = s;
+  return [
+    [-hw + c, -hh], [hw - c, -hh], [hw, -hh + c], [hw, hh - c],
+    [hw - c, hh], [-hw + c, hh], [-hw, hh - c], [-hw, -hh + c],
+  ].map(([x, y]) => planck.Vec2(x + cx, y + cy));
+}
+
+const riderFixture = (part, side) => ({
+  density: 1, friction: 0.8, restitution: 0.04,
+  filterCategoryBits: CAT_RIDER, filterMaskBits: CAT_GROUND, filterGroupIndex: -2,
+  userData: { rider: true, part, side },
+});
+
+function makeSegment(world, kind, side, pos, angle) {
+  const s = SEGMENTS[kind];
+  const body = world.createBody({ type: "dynamic", position: planck.Vec2(pos.x, pos.y), angle });
+  if (kind === "head") {
+    body.createFixture(new planck.CircleShape(s.r), riderFixture(kind, side));
+    body.setMassData({ mass: s.mass, center: planck.Vec2(0, 0), I: 0.4 * s.mass * s.r * s.r });
+  } else {
+    body.createFixture(new planck.PolygonShape(chamferBox(s)), riderFixture(kind, side));
+    const I = (s.mass * (4 * s.hw * s.hw + 4 * s.hh * s.hh)) / 12;
+    body.setMassData({ mass: s.mass, center: planck.Vec2(s.cx, s.cy), I: I + s.mass * (s.cx * s.cx + s.cy * s.cy) });
+  }
+  body.setAngularDamping(0.6);
+  body.setLinearDamping(0.02);
+  return body;
+}
+
+// Build the rider seated on `bike` in its riding pose, gripping bar and pegs.
+export function createRider(world, bike, tune) {
+  const origin = bike.chassis.getPosition();
+  const bAngle = bike.chassis.getAngle();
+  const pose = computePose(0, 0, tune.leanReach);
+  const vel = bike.chassis.getLinearVelocity();
+  const bodies = {};
+  const place = (key, kind, side) => {
+    const s = pose.seg[kind];
+    const b = makeSegment(world, kind, side, localToWorld(origin, bAngle, s), bAngle + s.a);
+    b.setLinearVelocity(vel);
+    bodies[key] = b;
+    return b;
+  };
+  place("torso", "torso", null);
+  place("head", "head", null);
+  for (const side of ["far", "near"]) {
+    for (const kind of ["ua", "fa", "hand", "thigh", "shin", "foot"]) place(`${kind}_${side}`, kind, side);
+  }
+
+  const muscles = [];
+  for (const j of JOINTS) {
+    const sides = j.side ? ["far", "near"] : [null];
+    for (const side of sides) {
+      const key = (k) => (k === "torso" || k === "head" ? k : `${k}_${side}`);
+      const joint = world.createJoint(new planck.RevoluteJoint({
+        bodyA: bodies[key(j.a)], bodyB: bodies[key(j.b)],
+        localAnchorA: planck.Vec2(ANCH[j.aa].x, ANCH[j.aa].y), localAnchorB: planck.Vec2(ANCH[j.ba].x, ANCH[j.ba].y),
+        referenceAngle: 0, enableLimit: true, lowerAngle: j.lo, upperAngle: j.hi,
+        enableMotor: true, maxMotorTorque: j.str, motorSpeed: 0,
+      }));
+      muscles.push({ joint, name: j.name, side, str: j.str, limp: j.limp, target: pose.targets[j.name] });
+    }
+  }
+
+  const grips = [];
+  for (const side of ["far", "near"]) {
+    grips.push({
+      kind: "hand", side, force: 0, peak: 0,
+      joint: world.createJoint(new planck.RevoluteJoint({
+        bodyA: bike.chassis, bodyB: bodies[`hand_${side}`],
+        localAnchorA: planck.Vec2(GEOM.grip.x, GEOM.grip.y), localAnchorB: planck.Vec2(ANCH.handGrip.x, ANCH.handGrip.y),
+        referenceAngle: pose.seg.hand.a,
+      })),
+    });
+    grips.push({
+      kind: "foot", side, force: 0, peak: 0,
+      joint: world.createJoint(new planck.RevoluteJoint({
+        bodyA: bike.chassis, bodyB: bodies[`foot_${side}`],
+        localAnchorA: planck.Vec2(GEOM.peg.x, GEOM.peg.y), localAnchorB: planck.Vec2(ANCH.footPeg.x, ANCH.footPeg.y),
+        referenceAngle: 0, enableLimit: true, lowerAngle: -0.5, upperAngle: 0.5,
+        enableMotor: true, maxMotorTorque: 140, motorSpeed: 0,
+      })),
+    });
+  }
+
+  const list = Object.values(bodies);
+  return {
+    bodies, list, muscles, grips,
+    mode: "riding", // riding → brace → limp
+    modeTime: 0,
+    lean: 0, crouch: 0,
+    pumpT: -1,
+    bikeCollide: new Set(), // fixtures already allowed to hit the bike again
+  };
+}
+
+export function riderMass(rider) {
+  let m = 0;
+  for (const b of rider.list) m += b.getMass();
+  return m;
+}
+
+// Per physics step: aim every joint motor at its target.
+export function driveRider(rider, h, tune) {
+  const riding = rider.mode === "riding";
+  const brace = rider.mode === "brace";
+  let pose = null;
+  if (riding) pose = computePose(rider.lean, rider.crouch, tune.leanReach).targets;
+  for (const m of rider.muscles) {
+    const angle = m.joint.getJointAngle();
+    let target;
+    let torque;
+    if (riding) {
+      target = pose[m.name];
+      torque = m.str * tune.muscle;
+    } else if (brace) {
+      target = TUCK[m.name];
+      torque = m.str * 0.3 * tune.muscle;
+    } else {
+      target = angle;
+      torque = m.limp;
+    }
+    m.target = target;
+    const err = wrapAngle(target - angle);
+    m.joint.setMotorSpeed(clamp(err * 14, -9, 9));
+    m.joint.setMaxMotorTorque(torque);
+  }
+  void h;
+}
+
+// Let go of the bike: destroy every grip still holding.
+export function releaseGrips(world, rider) {
+  for (const g of rider.grips) {
+    if (g.joint) {
+      world.destroyJoint(g.joint);
+      g.joint = null;
+    }
+  }
+}
+
+export function gripsHeld(rider) {
+  return rider.grips.filter((g) => g.joint).length;
+}
+
+// Once a released segment no longer overlaps the bike, let the two collide.
+export function enableBikeCollisions(rider, bike) {
+  if (rider.bikeCollide.size >= rider.list.length) return;
+  const bikeBoxes = [];
+  for (const b of bike.bodies) for (let f = b.getFixtureList(); f; f = f.getNext()) bikeBoxes.push(f.getAABB(0));
+  for (const body of rider.list) {
+    const f = body.getFixtureList();
+    if (rider.bikeCollide.has(f)) continue;
+    const box = f.getAABB(0);
+    let overlap = false;
+    for (const bb of bikeBoxes) {
+      if (box.lowerBound.x < bb.upperBound.x && box.upperBound.x > bb.lowerBound.x && box.lowerBound.y < bb.upperBound.y && box.upperBound.y > bb.lowerBound.y) {
+        overlap = true;
+        break;
+      }
+    }
+    if (!overlap) {
+      f.setFilterMaskBits(CAT_GROUND | CAT_BIKE);
+      rider.bikeCollide.add(f);
+    }
+  }
+}
+// Small deterministic helpers: the trail, its scenery and its noise must be
+// identical on every run so jumps can be learned.
+
+export function mulberry32(seed) {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+export function hash1(i, seed = 0) {
+  let h = (Math.imul(i | 0, 374761393) + Math.imul(seed | 0, 668265263)) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  h ^= h >>> 16;
+  return (h >>> 0) / 4294967296;
+}
+
+// Smooth 1D value noise in 0..1.
+export function valueNoise(x, seed = 0) {
+  const i = Math.floor(x);
+  const f = x - i;
+  const a = hash1(i, seed);
+  const b = hash1(i + 1, seed);
+  const u = f * f * (3 - 2 * f);
+  return a + (b - a) * u;
+}
+
+export const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
+
+export function smoothstep(e0, e1, x) {
+  const t = clamp((x - e0) / (e1 - e0), 0, 1);
+  return t * t * (3 - 2 * t);
+}
+
+export function wrapAngle(a) {
+  while (a > Math.PI) a -= Math.PI * 2;
+  while (a < -Math.PI) a += Math.PI * 2;
+  return a;
+}
+// Deterministic forest dressing: tree bands at several depths, plants along
+// the trail edge, foreground ferns, and the patches of shade the trail-side
+// trees cast across the dirt. Pure data — the renderer reads it.
+import { mulberry32 } from "./rng.js";
+import { SECTIONS, TRACK_END, TRACK_START } from "./track.js";
+
+const densityAt = (x) => {
+  for (const s of SECTIONS) if (x >= s.x0 && x < s.x1) return s.trees;
+  return 0.5;
+};
+
+// p = parallax factor (1 = the trail plane); haze = index into tinted copies.
+export const BANDS = [
+  { id: "far", p: 0.42, haze: 0, gap: [2.2, 4.5], scale: [0.5, 0.75], min: 0.2 },
+  { id: "mid", p: 0.62, haze: 1, gap: [3.5, 7], scale: [0.6, 0.9], min: 0.12 },
+  { id: "near", p: 0.84, haze: 2, gap: [5, 11], scale: [0.75, 1.05], min: 0.05 },
+  { id: "trail", p: 1, haze: -1, gap: [6, 13], scale: [0.85, 1.1], min: 0 },
+];
+
+export function buildScenery() {
+  const rand = mulberry32(4242);
+  const bands = BANDS.map((band) => {
+    const trees = [];
+    // Band coordinates: a tree at bx shows at screen x = (bx - cameraX) * p.
+    const x0 = TRACK_START * band.p - 40;
+    const x1 = TRACK_END * band.p + 40;
+    for (let bx = x0; bx < x1; ) {
+      const worldX = bx / band.p;
+      const d = densityAt(worldX);
+      bx += (band.gap[0] + rand() * (band.gap[1] - band.gap[0])) / Math.max(0.25, d);
+      if (band.id === "trail" && d < 0.45) continue;
+      if (rand() > Math.max(band.min, d)) continue;
+      const pine = rand() < (band.id === "trail" ? 0.88 : 0.68);
+      const s = band.scale[0] + rand() * (band.scale[1] - band.scale[0]);
+      trees.push({
+        bx,
+        type: pine ? "PINE_TREE" : "OAK_TREE",
+        h: pine ? 24 * s : 14 * s,
+        flip: rand() < 0.5,
+        sway: rand() * Math.PI * 2,
+      });
+    }
+    return { ...band, trees };
+  });
+
+  // Plants along the trail edge, drawn just behind the dirt line.
+  const edge = [];
+  const kinds = ["grass_tuft", "grass_tuft", "fern", "weeds", "bush", "grass_tuft", "weeds"];
+  for (let x = TRACK_START; x < TRACK_END; ) {
+    const d = densityAt(x);
+    x += 0.7 + rand() * 2.2 + (1 - d) * 1.2;
+    let kind = kinds[Math.floor(rand() * kinds.length)];
+    const r = rand();
+    if (r < 0.04) kind = "stump";
+    else if (r < 0.09) kind = "branch";
+    const base = { grass_tuft: 0.7, fern: 0.85, weeds: 0.9, bush: 0.9, stump: 0.55, branch: 0.3 }[kind];
+    edge.push({ x, kind, h: base * (0.7 + rand() * 0.6), flip: rand() < 0.5, back: rand() < 0.45, sway: rand() * 6.28 });
+  }
+
+  // Foreground plants that sweep past the lens.
+  const fore = [];
+  for (let x = TRACK_START; x < TRACK_END * 1.35; ) {
+    x += 6 + rand() * 12;
+    const kind = ["fern", "grass_tuft", "fern", "weeds", "bush"][Math.floor(rand() * 5)];
+    fore.push({ bx: x, kind, h: 1.3 + rand() * 1.1, flip: rand() < 0.5, sway: rand() * 6.28 });
+  }
+
+  // Long shadows: a low sun on the left throws each trail-side tree's shadow
+  // a few metres down the trail.
+  const res = 0.5;
+  const n = Math.ceil((TRACK_END - TRACK_START) / res) + 1;
+  const shade = new Float32Array(n);
+  const castFrom = (x, w, strength) => {
+    const a = x + 1.2;
+    const b = a + w;
+    for (let i = Math.floor((a - 1 - TRACK_START) / res); i <= Math.ceil((b + 1 - TRACK_START) / res); i++) {
+      if (i < 0 || i >= n) continue;
+      const xx = TRACK_START + i * res;
+      const t = xx < a ? 1 - (a - xx) : xx > b ? 1 - (xx - b) : 1;
+      if (t > 0) shade[i] = Math.max(shade[i], strength * t);
+    }
+  };
+  for (const t of bands[3].trees) castFrom(t.bx, t.type === "PINE_TREE" ? 2.5 + t.h * 0.12 : 5 + t.h * 0.2, 0.85);
+  for (const t of bands[2].trees) castFrom(t.bx / bands[2].p, 3 + t.h * 0.15, 0.45);
+  return { bands, edge, fore, shade, shadeRes: res };
+}
+
+export function shadeAt(scenery, x) {
+  const f = (x - TRACK_START) / scenery.shadeRes;
+  const i = Math.floor(f);
+  if (i < 0 || i >= scenery.shade.length - 1) return 0;
+  const t = f - i;
+  return scenery.shade[i] * (1 - t) + scenery.shade[i + 1] * t;
+}
+// The physics world: trail, bike, rider, and the rules that read the forces —
+// grips tearing free, a helmet hitting the dirt, a landing, a wreck. Runs at a
+// fixed 240 Hz step inside the SDK's frame dt. No DOM here, so it also runs
+// headless for tuning.
+import * as planck from "planck";
+import { CAT_GROUND, createBike, driveBike, GEOM } from "./bike.js";
+import { clamp, mulberry32 } from "./rng.js";
+import { createRider, driveRider, enableBikeCollisions, gripsHeld, releaseGrips } from "./rider.js";
+import { frictionAt, heightAt, pitZoneAt, SPAWN_X, STEP, TRACK_START } from "./track.js";
+
+export const H = 1 / 240;
+
+export function slopeAt(track, x) {
+  return (heightAt(track, x + 0.3) - heightAt(track, x - 0.3)) / 0.6;
+}
+
+function groundFixtureOpts(extra) {
+  return { friction: 0.95, restitution: 0.05, filterCategoryBits: CAT_GROUND, userData: { ground: true, ...extra } };
+}
+
+function ellipse(cx, cy, rx, ry, n = 8) {
+  const pts = [];
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * Math.PI * 2;
+    // Flatter bottom so rocks sit in the dirt.
+    const yy = Math.sin(a) < 0 ? Math.sin(a) * 0.7 : Math.sin(a);
+    pts.push(planck.Vec2(cx + Math.cos(a) * rx, cy + yy * ry));
+  }
+  return pts;
+}
+
+export function createSim(track, tune) {
+  const world = new planck.World({ gravity: planck.Vec2(0, -tune.gravity) });
+  const ground = world.createBody({ type: "static" });
+  const verts = [];
+  for (let i = 0; i < track.n; i++) verts.push(planck.Vec2(track.xs[i], track.heights[i]));
+  ground.createFixture(new planck.ChainShape(verts, false), groundFixtureOpts({}));
+  for (const p of track.props) {
+    if (p.type === "log") {
+      const hw = p.len / 2;
+      const r = p.r;
+      const c = r * 0.45;
+      const pts = [[-hw, -r + c], [-hw + c, -r], [hw - c, -r], [hw, -r + c], [hw, r - c], [hw - c, r], [-hw + c, r], [-hw, r - c]];
+      ground.createFixture(new planck.PolygonShape(pts.map(([x, y]) => planck.Vec2(p.x + x, p.y + y))), groundFixtureOpts({ prop: p.id }));
+    } else {
+      ground.createFixture(new planck.PolygonShape(ellipse(p.x, p.y, p.rx, p.ry)), groundFixtureOpts({ prop: p.id, rock: true }));
+    }
+  }
+
+  const sim = {
+    world, ground, track, tune,
+    bike: null, rider: null,
+    acc: 0, time: 0,
+    events: [],
+    impacts: [],
+    crash: null,
+    air: { t: 0, x0: 0, maxY: 0 },
+    pending: null,
+    marks: new Float32Array(track.n),
+    particles: [],
+    rand: mulberry32(1234),
+    lastTorsoVel: null,
+    distance: 0,
+    farthest: 0,
+    gripLostAt: { hands: -1, feet: -1 },
+  };
+
+  world.on("begin-contact", (c) => countWheel(sim, c, 1));
+  world.on("end-contact", (c) => countWheel(sim, c, -1));
+  world.on("pre-solve", (c) => {
+    const a = c.getFixtureA();
+    const b = c.getFixtureB();
+    const ua = a.getUserData() || {};
+    const ub = b.getUserData() || {};
+    const wheel = ua.wheel ? a : ub.wheel ? b : null;
+    if (wheel && (ua.ground || ub.ground)) {
+      const x = wheel.getBody().getPosition().x;
+      c.setFriction(1.02 * frictionAt(x) * sim.tune.grip);
+    }
+  });
+  world.on("post-solve", (c, impulse) => {
+    const n = c.getManifold().pointCount;
+    let sum = 0;
+    const ni = impulse.normalImpulses;
+    for (let i = 0; i < n; i++) sum += ni[i];
+    if (sum < 1) return;
+    const fa = c.getFixtureA();
+    const fb = c.getFixtureB();
+    sim.impacts.push({ a: fa.getUserData() || {}, b: fb.getUserData() || {}, impulse: sum, contact: c });
+  });
+
+  spawnAt(sim, SPAWN_X);
+  return sim;
+}
+
+function countWheel(sim, c, delta) {
+  const bike = sim.bike;
+  if (!bike) return;
+  const ua = c.getFixtureA().getUserData() || {};
+  const ub = c.getFixtureB().getUserData() || {};
+  if (!(ua.ground || ub.ground)) return;
+  const part = ua.wheel ? ua.part : ub.wheel ? ub.part : null;
+  if (part === "rearWheel") bike.rearContacts = Math.max(0, bike.rearContacts + delta);
+  if (part === "frontWheel") bike.frontContacts = Math.max(0, bike.frontContacts + delta);
+}
+
+function destroyActors(sim) {
+  const { world } = sim;
+  if (sim.rider) for (const b of sim.rider.list) world.destroyBody(b);
+  if (sim.bike) for (const b of sim.bike.bodies) world.destroyBody(b);
+  sim.rider = null;
+  sim.bike = null;
+}
+
+// Stand the bike up on its wheels at trail position x and put the rider back on.
+export function spawnAt(sim, x) {
+  destroyActors(sim);
+  const { track } = sim;
+  const slope = (heightAt(track, x + GEOM.frontAxle.x) - heightAt(track, x + GEOM.rearAxle.x)) / (GEOM.frontAxle.x - GEOM.rearAxle.x);
+  const angle = Math.atan(slope);
+  // Lift the chassis so both tyres clear the dirt by a couple of centimetres.
+  let lift = -Infinity;
+  for (const ax of [GEOM.rearAxle, GEOM.frontAxleExt]) {
+    const wx = x + ax.x * Math.cos(angle) - ax.y * Math.sin(angle);
+    const wy = ax.x * Math.sin(angle) + ax.y * Math.cos(angle);
+    const g = Math.max(heightAt(track, wx - 0.2), heightAt(track, wx), heightAt(track, wx + 0.2));
+    lift = Math.max(lift, g + GEOM.wheelR + 0.03 - wy);
+  }
+  sim.bike = createBike(sim.world, { x, y: lift }, angle);
+  sim.rider = createRider(sim.world, sim.bike, sim.tune);
+  sim.crash = null;
+  sim.pending = null;
+  sim.air = { t: 0, x0: x, maxY: lift };
+  sim.lastTorsoVel = null;
+  sim.gripLostAt = { hands: -1, feet: -1 };
+  sim.events.push({ type: "spawn" });
+}
+
+export function canPickUp(sim) {
+  const c = sim.crash;
+  if (sim.rider.mode === "riding") {
+    // A rider still holding on but stuck: bike on its back or wedged, barely moving.
+    const up = sim.bike.chassis.getWorldVector(planck.Vec2(0, 1));
+    return sim.bike.chassis.getLinearVelocity().length() < 1.2 && up.y < 0.35;
+  }
+  return !!c && (c.settled || c.t > 3);
+}
+
+export function pickUp(sim) {
+  if (!canPickUp(sim)) return false;
+  let x = sim.bike.chassis.getPosition().x;
+  const pit = pitZoneAt(x);
+  if (pit) x = pit.returnX;
+  x = clamp(x, TRACK_START + 20, 2552);
+  spawnAt(sim, x);
+  return true;
+}
+
+export function bail(sim) {
+  const { rider, bike } = sim;
+  if (rider.mode !== "riding") return false;
+  const up = bike.chassis.getWorldVector(planck.Vec2(0, 1));
+  const fwd = bike.chassis.getWorldVector(planck.Vec2(1, 0));
+  releaseGrips(sim.world, rider);
+  startCrash(sim, "bail");
+  // The legs push off: equal and opposite on rider and bike.
+  const J = { x: up.x * 150 - fwd.x * 45, y: up.y * 150 - fwd.y * 45 };
+  rider.bodies.torso.applyLinearImpulse(planck.Vec2(J.x, J.y), rider.bodies.torso.getWorldCenter(), true);
+  const peg = bike.chassis.getWorldPoint(planck.Vec2(GEOM.peg.x, GEOM.peg.y));
+  bike.chassis.applyLinearImpulse(planck.Vec2(-J.x, -J.y), peg, true);
+  return true;
+}
+
+export function pump(sim) {
+  if (sim.rider.mode === "riding" && sim.rider.pumpT < 0) sim.rider.pumpT = 0;
+}
+
+function startCrash(sim, cause) {
+  const { rider, bike } = sim;
+  if (sim.crash) return;
+  rider.mode = "brace";
+  rider.modeTime = 0;
+  const v = bike.chassis.getLinearVelocity().length();
+  sim.crash = { cause, t: 0, speed: v, peakG: 0, still: 0, settled: false, reported: false };
+  sim.pending = null;
+  sim.events.push({ type: "crash", cause, speed: v });
+}
+
+function pumpCrouch(t) {
+  if (t < 0.16) return 0.17 * (t / 0.16);
+  if (t < 0.36) return 0.17 - 0.31 * ((t - 0.16) / 0.2);
+  if (t < 0.62) return -0.14 * (1 - (t - 0.36) / 0.26);
+  return 0;
+}
+
+function substep(sim, input) {
+  const { bike, rider, world, tune } = sim;
+  const h = H;
+
+  if (rider.mode === "riding") {
+    const target = input.lean;
+    rider.lean += clamp(target - rider.lean, -h * 5, h * 5);
+    if (rider.pumpT >= 0) {
+      rider.pumpT += h;
+      rider.crouch = pumpCrouch(rider.pumpT);
+      if (rider.pumpT > 0.62) {
+        rider.pumpT = -1;
+        rider.crouch = 0;
+      }
+    }
+  }
+
+  // A rider who has let go no longer twists the throttle or pulls the brakes.
+  driveBike(bike, rider.mode === "riding" ? input : { throttle: false, brake: false }, tune, h);
+  driveRider(rider, h, tune);
+  sim.impacts.length = 0;
+  world.step(h, 10, 6);
+  sim.time += h;
+
+  // Grips: smoothed load against what a hand or a boot can hold.
+  const blend = 1 - Math.exp(-h / 0.025);
+  let lost = false;
+  for (const g of rider.grips) {
+    if (!g.joint) continue;
+    const F = g.joint.getReactionForce(1 / h).length();
+    g.force += (F - g.force) * blend;
+    g.peak = Math.max(g.peak, g.force);
+    const limit = (g.kind === "hand" ? 2500 : 6200) * tune.gripStrength;
+    if (g.force > limit) {
+      world.destroyJoint(g.joint);
+      g.joint = null;
+      lost = true;
+      sim.events.push({ type: "grip", kind: g.kind });
+    }
+  }
+  if (lost || rider.mode === "riding") {
+    const hands = rider.grips.filter((g) => g.kind === "hand" && g.joint).length;
+    const feet = rider.grips.filter((g) => g.kind === "foot" && g.joint).length;
+    if (hands === 0 && sim.gripLostAt.hands < 0) sim.gripLostAt.hands = sim.time;
+    if (feet === 0 && sim.gripLostAt.feet < 0) sim.gripLostAt.feet = sim.time;
+    // Without hands on the bar the boots slip off; hanging by the hands alone doesn't last.
+    const handsGone = sim.gripLostAt.hands >= 0 && sim.time - sim.gripLostAt.hands > 0.12;
+    const feetGone = sim.gripLostAt.feet >= 0 && sim.time - sim.gripLostAt.feet > 0.45;
+    if ((handsGone || feetGone) && rider.mode === "riding") {
+      releaseGrips(world, rider);
+      startCrash(sim, "thrown");
+    }
+  }
+
+  // Contacts this step.
+  for (const imp of sim.impacts) {
+    const { a, b, impulse } = imp;
+    const r = a.rider ? a : b.rider ? b : null;
+    const other = r === a ? b : a;
+    if (r && (other.ground || other.part)) {
+      const part = r.part;
+      if (rider.mode === "riding" && other.ground) {
+        const hard =
+          (part === "head" && impulse > 2) ||
+          (part === "torso" && impulse > 10) ||
+          ((part === "ua" || part === "fa" || part === "thigh") && impulse > 22);
+        if (hard) {
+          releaseGrips(world, rider);
+          startCrash(sim, "impact");
+        }
+      } else if (rider.mode === "brace" && impulse > 45 && (part === "head" || part === "torso")) {
+        rider.mode = "limp";
+      }
+      if (impulse > 12) recordImpact(sim, imp, "body", impulse);
+    } else if (!r) {
+      const bp = a.part ? a : b.part ? b : null;
+      const ground = a.ground || b.ground;
+      if (bp && ground && !bp.wheel && impulse > 25) recordImpact(sim, imp, "bike", impulse);
+      if (bp && ground && bp.wheel && impulse > 40) recordImpact(sim, imp, "wheel", impulse);
+    }
+  }
+
+  if (rider.mode !== "riding") {
+    rider.modeTime += h;
+    if (rider.mode === "brace" && rider.modeTime > 0.75) rider.mode = "limp";
+    enableBikeCollisions(rider, bike);
+  }
+}
+
+function recordImpact(sim, imp, kind, impulse) {
+  const wm = imp.contact.getWorldManifold(null);
+  const p = wm && wm.points && wm.points[0] ? wm.points[0] : null;
+  sim.frameImpacts.push({ kind, impulse, x: p ? p.x : 0, y: p ? p.y : 0 });
+}
+
+export function stepSim(sim, dt, input) {
+  sim.frameImpacts = [];
+  sim.acc += dt;
+  let n = 0;
+  while (sim.acc >= H && n < 12) {
+    substep(sim, input);
+    sim.acc -= H;
+    n++;
+  }
+  if (n === 12) sim.acc = 0;
+  if (n === 0) return;
+  frameRules(sim, dt);
+}
+
+// Once per frame: jumps, wrecks, tyre marks, dust, impacts as events.
+function frameRules(sim, dt) {
+  const { bike, rider, track } = sim;
+  const pos = bike.chassis.getPosition();
+  const v = bike.chassis.getLinearVelocity();
+  const riding = rider.mode === "riding";
+  sim.distance = pos.x - SPAWN_X;
+  if (riding) sim.farthest = Math.max(sim.farthest, pos.x);
+
+  // Air time and jump length, measured from the last tyre contact.
+  const grounded = bike.rearContacts > 0 || bike.frontContacts > 0;
+  if (grounded) {
+    if (sim.air.t > 0.4 && riding) {
+      sim.pending = { dist: Math.abs(pos.x - sim.air.x0), air: sim.air.t, t: 0, x: pos.x, y: pos.y };
+    }
+    sim.air.t = 0;
+    sim.air.x0 = pos.x;
+  } else {
+    sim.air.t += dt;
+  }
+  if (sim.pending) {
+    sim.pending.t += dt;
+    if (!riding) sim.pending = null;
+    else if (sim.pending.t > 0.8) {
+      sim.events.push({ type: "jump", dist: sim.pending.dist, air: sim.pending.air, x: sim.pending.x, y: sim.pending.y });
+      sim.pending = null;
+    }
+  }
+
+  // Wreck force: peak deceleration of the torso after the rider comes off.
+  const torso = rider.bodies.torso;
+  const tv = torso.getLinearVelocity();
+  if (sim.crash) {
+    const c = sim.crash;
+    c.t += dt;
+    if (sim.lastTorsoVel && c.t > 0.05) {
+      const g = Math.hypot(tv.x - sim.lastTorsoVel.x, tv.y - sim.lastTorsoVel.y) / dt / 9.81;
+      if (c.t < 3) c.peakG = Math.max(c.peakG, Math.min(g, 80));
+    }
+    let maxV = 0;
+    for (const b of rider.list) maxV = Math.max(maxV, b.getLinearVelocity().length());
+    maxV = Math.max(maxV, v.length());
+    c.still = maxV < 0.6 ? c.still + dt : 0;
+    if (c.still > 0.6 && c.t > 1) c.settled = true;
+    if (!c.reported && (c.settled || c.t > 2.6)) {
+      c.reported = true;
+      sim.events.push({ type: "wreck", g: c.peakG, cause: c.cause, x: torso.getPosition().x, y: torso.getPosition().y });
+    }
+  }
+  sim.lastTorsoVel = { x: tv.x, y: tv.y };
+
+  // Tyres: ruts pressed into the dirt, dust and roost where they slip.
+  const dustScale = sim.tune.dust;
+  for (const [wheel, contacts, rear] of [[bike.rearWheel, bike.rearContacts, true], [bike.frontWheel, bike.frontContacts, false]]) {
+    if (contacts <= 0) continue;
+    const wp = wheel.getPosition();
+    const s = slopeAt(track, wp.x);
+    const nl = Math.hypot(-s, 1);
+    const n = { x: -s / nl, y: 1 / nl };
+    const cp = planck.Vec2(wp.x - n.x * 0.34, wp.y - n.y * 0.34);
+    const slipV = wheel.getLinearVelocityFromWorldPoint(cp);
+    const slip = slipV.length();
+    const speed = wheel.getLinearVelocity().length();
+    const idx = Math.round((cp.x - TRACK_START) / STEP);
+    if (idx > 0 && idx < sim.marks.length - 1) {
+      const add = Math.min(0.5, 0.02 + slip * 0.04 + speed * 0.002);
+      sim.marks[idx] = Math.min(1, sim.marks[idx] + add);
+      sim.marks[idx + 1] = Math.min(1, sim.marks[idx + 1] + add * 0.5);
+    }
+    const rate = ((rear ? 1 : 0.35) * (slip * 1.6 + speed * 0.25)) * dustScale;
+    let count = rate * dt * 6;
+    while (count > 0) {
+      if (sim.rand() < count) spawnDust(sim, cp, slipV, rear ? 1 : 0.6);
+      count -= 1;
+    }
+    if (rear && slip > 2.5 && dustScale > 0) {
+      // Roost: clods flung back off the knobs.
+      for (let i = 0; i < Math.min(3, slip * 0.3); i++) spawnClod(sim, cp, slipV);
+    }
+  }
+
+  for (const imp of sim.frameImpacts) {
+    sim.events.push({ type: "impact", kind: imp.kind, impulse: imp.impulse, x: imp.x, y: imp.y });
+    if (dustScale > 0) {
+      const puffs = Math.min(10, imp.impulse / 25) * dustScale;
+      for (let i = 0; i < puffs; i++) spawnDust(sim, imp, { x: 0, y: 0 }, 1.3);
+    }
+  }
+
+  updateParticles(sim, dt);
+}
+
+function spawnDust(sim, p, slipV, scale) {
+  if (sim.particles.length > 420) return;
+  const r = sim.rand;
+  sim.particles.push({
+    kind: "dust",
+    x: p.x + (r() - 0.5) * 0.3, y: p.y + r() * 0.15,
+    vx: -slipV.x * 0.25 + (r() - 0.5) * 1.2, vy: Math.abs(slipV.y) * 0.1 + 0.3 + r() * 0.9,
+    life: 0, max: 1.4 + r() * 1.6, size: (0.25 + r() * 0.35) * scale, grow: 0.7 + r() * 0.8, seed: r(),
+  });
+}
+
+function spawnClod(sim, p, slipV) {
+  if (sim.particles.length > 420) return;
+  const r = sim.rand;
+  sim.particles.push({
+    kind: "clod",
+    x: p.x, y: p.y + 0.05,
+    vx: -slipV.x * (0.35 + r() * 0.4) + (r() - 0.5), vy: 1.2 + r() * 2.4,
+    life: 0, max: 1.2, size: 0.025 + r() * 0.035, seed: r(),
+  });
+}
+
+function updateParticles(sim, dt) {
+  const ps = sim.particles;
+  const g = sim.tune.gravity;
+  for (let i = ps.length - 1; i >= 0; i--) {
+    const p = ps[i];
+    p.life += dt;
+    if (p.kind === "dust") {
+      p.vx *= Math.exp(-dt * 1.6);
+      p.vy = p.vy * Math.exp(-dt * 1.8) + 0.25 * dt;
+      p.size += p.grow * dt;
+    } else {
+      p.vy -= g * dt;
+      if (p.y < heightAt(sim.track, p.x)) p.life = p.max;
+    }
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    if (p.life >= p.max) ps.splice(i, 1);
+  }
+}
+
+export function setGravity(sim, g) {
+  sim.world.setGravity(planck.Vec2(0, -g));
+}
+
+export function riderBounds(sim) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const b of sim.rider.list) {
+    const p = b.getPosition();
+    x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y); x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y);
+  }
+  return { x0: x0 - 0.25, y0: y0 - 0.25, x1: x1 + 0.25, y1: y1 + 0.25 };
+}
+
+export { gripsHeld };
+// The trail: one continuous, hand-authored forest track. Everything here is
+// deterministic data (heights, sections, rocks, logs) built once at load —
+// the physics ground and every scenery layer read from it.
+import { hash1, mulberry32, smoothstep, valueNoise } from "./rng.js";
+
+export const STEP = 0.25; // metres between surface samples
+export const TRACK_START = -40;
+export const TRACK_END = 2640;
+export const SPAWN_X = 14;
+export const END_ZONE_X = 2556;
+
+export const SECTIONS = [
+  { id: "pine-gate", name: "Pine Gate", x0: TRACK_START, x1: 280, trees: 0.75, rough: 0.8 },
+  { id: "root-run", name: "Root Run", x0: 280, x1: 560, trees: 1.0, rough: 1.5 },
+  { id: "clearing", name: "The Clearing", x0: 560, x1: 960, trees: 0.22, rough: 0.6 },
+  { id: "ridge-climb", name: "Ridge Climb", x0: 960, x1: 1220, trees: 0.6, rough: 1.2 },
+  { id: "widows-drop", name: "Widow's Drop", x0: 1220, x1: 1480, trees: 0.8, rough: 1.2 },
+  { id: "berm-bowl", name: "Berm Bowl", x0: 1480, x1: 1700, trees: 0.45, rough: 0.8 },
+  { id: "the-gap", name: "The Gap", x0: 1700, x1: 1960, trees: 0.5, rough: 0.8 },
+  { id: "overlook", name: "Sundown Overlook", x0: 1960, x1: TRACK_END, trees: 0.18, rough: 0.7 },
+];
+
+// Loose dirt and braking bumps grip less than the packed trail.
+const FRICTION_ZONES = [
+  { x0: 975, x1: 1215, f: 0.72 },
+  { x0: 1225, x1: 1305, f: 0.85 },
+  { x0: 1799, x1: 1817, f: 0.9 },
+];
+
+// Falling into the ravine: picking the bike up there carries it back to the run-in.
+export const PIT_ZONES = [{ x0: 1798.5, x1: 1817.2, returnX: 1745 }];
+
+// Base elevation, metres. Blurred afterwards so slopes meet smoothly.
+const BASE = [
+  [-40, 10], [-24, 10], [-10, 0.5], [-4, 0], [30, 0], [150, 0.5], [280, 2], [420, 1.4], [560, 0], [960, 0],
+  [985, 0.5], [1010, 6], [1040, 7.5], [1055, 15], [1085, 16], [1100, 24], [1125, 25], [1140, 31], [1170, 32],
+  [1190, 36], [1220, 37], [1250, 33.5], [1300, 27], [1326, 25.5], [1345, 24], [1380, 12], [1440, 9], [1480, 7],
+  [1700, 7], [1960, 7], [2000, 8], [2120, 17], [2200, 18], [2300, 16], [2560, 17], [2575, 17.5], [2590, 22],
+  [2640, 32],
+];
+
+function buildFeatures() {
+  const f = [];
+  const hump = (x0, len, h) =>
+    f.push({ x0, x1: x0 + len, fn: (x) => h * Math.sin((Math.PI * (x - x0)) / len) ** 2 });
+  // A permanent change of level (ledge, cliff, plateau edge).
+  const step = (x0, h, w) => f.push({ x0, x1: Infinity, fn: (x) => h * smoothstep(x0, x0 + w, x) });
+  const table = (x0, face, h, top, back) =>
+    f.push({
+      x0,
+      x1: x0 + face + top + back,
+      fn: (x) => {
+        const s = x - x0;
+        if (s < face) return h * (s / face) ** 1.6;
+        if (s < face + top) return h;
+        const u = (s - face - top) / back;
+        return h * (0.5 + 0.5 * Math.cos(Math.PI * u));
+      },
+    });
+  // Concave take-off face that ends at a lip, then a steep back side.
+  const kicker = (x0, len, h, back, pow = 1.8) =>
+    f.push({
+      x0,
+      x1: x0 + len + back,
+      fn: (x) => {
+        const s = x - x0;
+        if (s < len) return h * (s / len) ** pow;
+        return h * (1 - (s - len) / back);
+      },
+    });
+  const landing = (x0, up, h, down) =>
+    f.push({
+      x0,
+      x1: x0 + up + down,
+      fn: (x) => {
+        const s = x - x0;
+        if (s < up) return h * Math.sin((Math.PI / 2) * (s / up));
+        const u = (s - up) / down;
+        return h * (0.5 + 0.5 * Math.cos(Math.PI * u));
+      },
+    });
+  const ravine = (x0, w, depth) =>
+    f.push({
+      x0,
+      x1: x0 + w,
+      fn: (x) => -depth * (smoothstep(x0, x0 + 1, x) - smoothstep(x0 + w - 1, x0 + w, x)),
+    });
+
+  // Pine Gate: rollers, a patch of small bumps, the first little tabletop.
+  hump(40, 8, 0.45);
+  hump(52, 8, 0.55);
+  hump(64, 9, 0.7);
+  for (let x = 95; x < 113; x += 2.4) hump(x, 1.4, 0.12);
+  hump(122, 12, 0.9);
+  hump(140, 12, 1.1);
+  table(170, 6, 1.3, 6, 7);
+  hump(205, 10, 0.8);
+  hump(218, 10, 0.8);
+  hump(232, 14, 1.2);
+  hump(255, 9, 0.6);
+
+  // Root Run: exposed roots, a ledge down, a root kicker, a compression.
+  const rand = mulberry32(77);
+  for (let x = 286; x < 548; x += 1.6 + rand() * 2.6) {
+    if (x > 375 && x < 390) continue; // keep the log clear
+    if (x > 462 && x < 476) continue;
+    hump(x, 0.3 + rand() * 0.22, 0.05 + rand() * 0.07);
+  }
+  step(420, -0.6, 0.35);
+  kicker(452, 3, 0.5, 2);
+  hump(500, 10, -0.9);
+
+  // The Clearing: tabletop, step-up onto a plateau, the double, a big table.
+  table(600, 8, 2.2, 14, 10);
+  kicker(676, 7, 1.7, 1.2);
+  step(689, 2.6, 1.2);
+  step(755, -2.6, 7);
+  kicker(800, 7, 2.0, 2.5, 1.8);
+  landing(819, 3, 2.2, 11);
+  table(865, 9, 3.0, 16, 12);
+  hump(930, 10, 0.6);
+  hump(944, 10, 0.6);
+
+  // Ridge Climb: small rock ledges on the way up.
+  step(1066, 0.4, 0.25);
+  step(1131, 0.35, 0.25);
+  step(1178, 0.45, 0.3);
+
+  // Widow's Drop: braking bumps, then a 3 m drop-off onto a steep slope.
+  for (let x = 1228; x < 1300; x += 1.6) hump(x, 1.3, 0.13);
+  step(1330, -3, 0.7);
+  hump(1405, 10, 0.7);
+  hump(1420, 10, 0.7);
+  hump(1445, 12, 0.9);
+
+  // Berm Bowl: compressions and a whoops section.
+  hump(1495, 14, -1.6);
+  hump(1525, 14, -1.6);
+  for (let x = 1560; x < 1622; x += 3) hump(x, 2.8, 0.55);
+  hump(1640, 20, -2.2);
+  hump(1668, 9, 0.6);
+  hump(1680, 9, 0.6);
+
+  // The Gap: kicker, a 23 m ravine, a short steep landing.
+  kicker(1789, 9, 2.4, 0.8, 2.2);
+  ravine(1798.8, 18.4, 9);
+  landing(1816.6, 0.6, 2.6, 20);
+  hump(1870, 10, 0.6);
+  hump(1890, 12, 0.8);
+  hump(1915, 10, 0.6);
+  table(1930, 6, 1.4, 5, 7);
+
+  // Sundown Overlook: long run-up, the huge kicker, the ridge.
+  hump(1985, 10, 0.5);
+  hump(2050, 14, 0.7);
+  kicker(2205, 11, 3.6, 1.2, 2);
+  landing(2234, 1.0, 3.2, 26);
+  for (let x = 2320; x < 2540; x += 18 + hash1(Math.floor(x), 5) * 10) hump(x, 10, 0.5 + hash1(Math.floor(x), 9) * 0.4);
+  return f;
+}
+
+function sectionAt(x) {
+  for (const s of SECTIONS) if (x >= s.x0 && x < s.x1) return s;
+  return SECTIONS[SECTIONS.length - 1];
+}
+
+function blur(src, radius) {
+  const n = src.length;
+  const out = new Float32Array(n);
+  const prefix = new Float64Array(n + 1);
+  for (let i = 0; i < n; i++) prefix[i + 1] = prefix[i] + src[i];
+  for (let i = 0; i < n; i++) {
+    const a = Math.max(0, i - radius);
+    const b = Math.min(n - 1, i + radius);
+    out[i] = (prefix[b + 1] - prefix[a]) / (b - a + 1);
+  }
+  return out;
+}
+
+export function buildTrack() {
+  const n = Math.round((TRACK_END - TRACK_START) / STEP) + 1;
+  const xs = new Float32Array(n);
+  let base = new Float32Array(n);
+  let k = 0;
+  for (let i = 0; i < n; i++) {
+    const x = TRACK_START + i * STEP;
+    xs[i] = x;
+    while (k < BASE.length - 2 && x > BASE[k + 1][0]) k++;
+    const [x0, y0] = BASE[k];
+    const [x1, y1] = BASE[k + 1];
+    const t = Math.min(1, Math.max(0, (x - x0) / (x1 - x0)));
+    base[i] = y0 + (y1 - y0) * t;
+  }
+  base = blur(blur(base, 8), 8);
+
+  const features = buildFeatures();
+  const heights = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const x = xs[i];
+    let y = base[i];
+    for (const f of features) if (x >= f.x0 && x <= f.x1) y += f.fn(x);
+    const amp = sectionAt(x).rough;
+    y +=
+      amp *
+      (0.08 * (2 * valueNoise(x / 9, 3) - 1) +
+        0.03 * (2 * valueNoise(x / 1.9, 11) - 1) +
+        0.014 * (2 * valueNoise(x / 0.55, 23) - 1));
+    heights[i] = y;
+  }
+  // A wide blur of the ground: where the forest floor sits behind the trail.
+  const smooth = blur(blur(heights, 50), 50);
+
+  // Rocks and logs that sit on the trail and collide.
+  const props = [];
+  let pid = 1;
+  const rock = (x, size) => props.push({ id: `prop-${pid++}`, type: size > 0.5 ? "rock-large" : "rock-small", x, rx: size, ry: size * (size > 0.5 ? 0.55 : 0.78) });
+  const log = (x) => props.push({ id: `prop-${pid++}`, type: "log", x, len: 2.3, r: 0.19 });
+  [330, 352, 405, 446, 521, 543].forEach((x, i) => rock(x, 0.18 + (i % 3) * 0.04));
+  rock(492, 0.72);
+  log(382);
+  log(469);
+  rock(1805, 0.6);
+  rock(1810, 0.3);
+  rock(1813.5, 0.22);
+  rock(2400, 0.2);
+  rock(2470, 0.24);
+
+  const track = { n, xs, heights, smooth, props };
+  for (const p of props) {
+    const g = heightAt(track, p.x);
+    if (p.type === "log") p.y = g + p.r * 0.85;
+    else p.y = g + p.ry * 0.3;
+  }
+  return track;
+}
+
+export function heightAt(track, x) {
+  const f = (x - TRACK_START) / STEP;
+  const i = Math.floor(f);
+  if (i < 0) return track.heights[0];
+  if (i >= track.n - 1) return track.heights[track.n - 1];
+  const t = f - i;
+  return track.heights[i] * (1 - t) + track.heights[i + 1] * t;
+}
+
+export function smoothHeightAt(track, x) {
+  const f = (x - TRACK_START) / STEP;
+  const i = Math.max(0, Math.min(track.n - 2, Math.floor(f)));
+  const t = Math.min(1, Math.max(0, f - i));
+  return track.smooth[i] * (1 - t) + track.smooth[i + 1] * t;
+}
+
+export function frictionAt(x) {
+  for (const z of FRICTION_ZONES) if (x >= z.x0 && x <= z.x1) return z.f;
+  return 1;
+}
+
+export function sectionIndexAt(x) {
+  for (let i = 0; i < SECTIONS.length; i++) if (x >= SECTIONS[i].x0 && x < SECTIONS[i].x1) return i;
+  return x < SECTIONS[0].x0 ? 0 : SECTIONS.length - 1;
+}
+
+export function pitZoneAt(x) {
+  return PIT_ZONES.find((z) => x >= z.x0 && x <= z.x1) ?? null;
+}
