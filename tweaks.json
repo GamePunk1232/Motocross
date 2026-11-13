@@ -1,0 +1,183 @@
+{
+  "enginePower": {
+    "type": "number",
+    "value": 1,
+    "min": 0.4,
+    "max": 1.6,
+    "step": 0.05,
+    "name": "Engine power",
+    "description": "Torque and power at the rear wheel. More makes wheelies and loop-outs easier.",
+    "group": "def:bike",
+    "index": 1
+  },
+  "tyreGrip": {
+    "type": "number",
+    "value": 1,
+    "min": 0.5,
+    "max": 1.4,
+    "step": 0.05,
+    "name": "Tyre grip",
+    "description": "How hard the knobbies bite the dirt before they spin or slide.",
+    "group": "def:bike",
+    "index": 2
+  },
+  "frontSpring": {
+    "type": "number",
+    "value": 11000,
+    "min": 6000,
+    "max": 18000,
+    "step": 500,
+    "name": "Fork spring rate",
+    "description": "Stiffness of the front fork in newtons per metre. Softer soaks bumps but bottoms out on big landings.",
+    "group": "def:bike",
+    "index": 3
+  },
+  "rearSpring": {
+    "type": "number",
+    "value": 9000,
+    "min": 5000,
+    "max": 16000,
+    "step": 500,
+    "name": "Shock spring rate",
+    "description": "Stiffness of the rear shock at the axle. Softer squats more under throttle.",
+    "group": "def:bike",
+    "index": 4
+  },
+  "suspensionDamping": {
+    "type": "number",
+    "value": 1,
+    "min": 0.4,
+    "max": 2,
+    "step": 0.05,
+    "name": "Suspension damping",
+    "description": "How much the fork and shock resist moving. Low feels pogo-like, high feels harsh.",
+    "group": "def:bike",
+    "index": 5
+  },
+  "brakeStrength": {
+    "type": "number",
+    "value": 1,
+    "min": 0.4,
+    "max": 1.6,
+    "step": 0.05,
+    "name": "Brake strength",
+    "description": "Clamping force of both brakes. Strong front braking can pitch the rider over the bars.",
+    "group": "def:bike",
+    "index": 6
+  },
+  "gripStrength": {
+    "type": "number",
+    "value": 1,
+    "min": 0.4,
+    "max": 3,
+    "step": 0.05,
+    "name": "Rider grip",
+    "description": "How much force the hands and boots take before they tear free of the bars and pegs.",
+    "group": "def:rider",
+    "index": 1
+  },
+  "muscleStrength": {
+    "type": "number",
+    "value": 1,
+    "min": 0.5,
+    "max": 1.6,
+    "step": 0.05,
+    "name": "Rider strength",
+    "description": "Torque the rider's joints can make to hold a position and absorb landings.",
+    "group": "def:rider",
+    "index": 2
+  },
+  "leanReach": {
+    "type": "number",
+    "value": 1,
+    "min": 0.5,
+    "max": 1.3,
+    "step": 0.05,
+    "name": "Lean range",
+    "description": "How far the rider moves the hips forward and back when leaning.",
+    "group": "def:rider",
+    "index": 3
+  },
+  "gravity": {
+    "type": "number",
+    "value": 9.81,
+    "min": 4,
+    "max": 16,
+    "step": 0.1,
+    "name": "Gravity",
+    "description": "Downward acceleration in metres per second squared. Earth is 9.81.",
+    "group": "def:terrain",
+    "index": 1
+  },
+  "viewWidth": {
+    "type": "number",
+    "value": 16,
+    "min": 10,
+    "max": 44,
+    "step": 1,
+    "name": "View width",
+    "description": "How many metres of trail fit across the screen while riding.",
+    "group": "def:camera",
+    "index": 1
+  },
+  "lookAhead": {
+    "type": "number",
+    "value": 0.2,
+    "min": 0,
+    "max": 0.8,
+    "step": 0.05,
+    "name": "Look-ahead",
+    "description": "How far the camera leads the bike in the direction it is moving.",
+    "group": "def:camera",
+    "index": 2
+  },
+  "sunWarmth": {
+    "type": "number",
+    "value": 0.7,
+    "min": 0,
+    "max": 1,
+    "step": 0.05,
+    "name": "Golden light",
+    "description": "Strength of the warm low-sun grade, flare and light shafts.",
+    "group": "def:backdrop",
+    "index": 1
+  },
+  "dustAmount": {
+    "type": "number",
+    "value": 1,
+    "min": 0,
+    "max": 2,
+    "step": 0.1,
+    "name": "Dust and roost",
+    "description": "How much dust and dirt the tyres and crashes throw up.",
+    "group": "def:dust",
+    "index": 1
+  },
+  "showPhysics": {
+    "type": "boolean",
+    "value": false,
+    "name": "Show physics",
+    "description": "Overlay collision shapes, joints and the load on each grip.",
+    "group": "quick",
+    "index": 1
+  },
+  "masterVolume": {
+    "type": "number",
+    "value": 0.8,
+    "min": 0,
+    "max": 1,
+    "step": 0.05,
+    "name": "Volume",
+    "description": "Overall loudness of engine, impacts and forest.",
+    "group": "sound",
+    "index": 1
+  },
+  "muted": {
+    "type": "boolean",
+    "value": false,
+    "name": "Mute",
+    "description": "Silence all sound.",
+    "group": "sound",
+    "index": 2
+  }
+}
