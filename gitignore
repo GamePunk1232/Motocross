@@ -1,0 +1,18 @@
+node_modules/
+.opencode/node_modules/
+dist/
+.env
+.env.*
+!.env.example
+
+# Keep the scratch dir in the repo, but never commit its contents.
+# Exceptions: plan files and the editor layout are product artifacts — they
+# are committed so they survive pod death and ride remixes/rollbacks with
+# the project.
+.playabl/*
+!.playabl/metadata.json
+!.playabl/plan.md
+!.playabl/devtools-ui.json
+!.playabl/tmp/
+.playabl/tmp/*
+!.playabl/tmp/.gitignore
